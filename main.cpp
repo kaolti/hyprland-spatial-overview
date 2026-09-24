@@ -397,6 +397,8 @@ static SP<IOverview> dispatcherOverview() {
     return activeScrollOverview();
 }
 
+void canvasReclaimScreen(const PHLMONITOR& monitor); // scrollOverview.cpp
+
 static bool openOverview(PHLMONITOR monitor) {
     if (!monitor || scrollOverviewForMonitor(monitor))
         return true;
@@ -409,8 +411,17 @@ static bool openOverview(PHLMONITOR monitor) {
     auto overview                    = makeShared<CScrollOverview>(monitor->m_activeWorkspace, false, monitor);
     registerScrollOverview(overview);
     renderingOverview = PREVRENDERINGOVERVIEW;
+    canvasReclaimScreen(monitor);
     return true;
 }
+
+bool openCanvasOverview(PHLMONITOR monitor) {
+    return openOverview(monitor);
+}
+
+void canvasFullscreenEvent(PHLWINDOW window); // scrollOverview.cpp
+void canvasFullscreenReset();
+bool canvasToggleFill(PHLWINDOW window);
 
 static SDispatchResult onOverviewDispatcher(std::string arg) {
     const auto [ACTION, TARGET] = splitOverviewArg(arg);
@@ -579,6 +590,8 @@ static SDispatchResult onCanvasDispatcher(std::string arg) {
         requestFlightDeckNative(Desktop::focusState()->window(), arg == "fullscreen" ? Fullscreen::FSMODE_FULLSCREEN : arg == "maximize" ? Fullscreen::FSMODE_MAXIMIZED : Fullscreen::FSMODE_NONE);
         return {};
     }
+    if (arg == "fill")
+        return canvasToggleFill(Desktop::focusState()->window()) ? SDispatchResult{} : SDispatchResult{.success = false, .error = "Open the canvas before using this action"};
     if (!CANVAS)
         return arg == "refresh" ? SDispatchResult{} : SDispatchResult{.success = false, .error = "Open the canvas before using this action"};
     if (arg == "back" || arg == "land" || arg == "frame" || arg == "undo" || arg == "redo" || arg == "fit" || arg == "summon" || arg == "search" || arg == "tune" ||
@@ -844,6 +857,25 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     SpatialOverview::Experiments::load();
 
+    // Fullscreen on the canvas: only the screen showing the window steps
+    // aside, and comes back after (scrollOverview.cpp).
+    static auto CANVASFULLSCREEN = Event::bus()->m_events.window.fullscreen.listen([](PHLWINDOW window) {
+        if (!g_unloading)
+            canvasFullscreenEvent(window);
+    });
+    static auto CANVASFULLSCREENCLOSE = Event::bus()->m_events.window.close.listen([](PHLWINDOW) {
+        if (!g_unloading)
+            canvasFullscreenEvent(nullptr);
+    });
+    static auto CANVASFULLSCREENMOVE = Event::bus()->m_events.window.moveToWorkspace.listen([](PHLWINDOW, PHLWORKSPACE) {
+        if (!g_unloading)
+            canvasFullscreenEvent(nullptr);
+    });
+    static auto CANVASFULLSCREENWORKSPACE = Event::bus()->m_events.workspace.active.listen([](PHLWORKSPACE) {
+        if (!g_unloading)
+            canvasFullscreenEvent(nullptr);
+    });
+
     // Recency for the navigator is tracked for the whole session, not only
     // while the canvas is open, so "recent first" means what it says.
     static auto NAVIGATORFOCUS = Event::bus()->m_events.window.active.listen([](PHLWINDOW window, Desktop::eFocusReason) { SpatialOverview::Navigator::noteFocus(window); });
@@ -872,6 +904,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pHyprRenderer->m_renderPass.removeAllOfType("CScrollOverviewPassElement");
 
     g_unloading = true;
+    canvasFullscreenReset();
     clearScrollOverviews();
     disableScrollOverviewHooks();
     canvasReleaseX11Windows();

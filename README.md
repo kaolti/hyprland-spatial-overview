@@ -68,6 +68,8 @@ them too.
 | `ALT + TAB`, `ALT + SHIFT + TAB` | Recent windows. A tap flips to the previous one; hold `ALT` for the list, release to go. |
 | `SUPER` + arrows | Focus the nearest window in that direction; the camera follows. |
 | `SUPER + SHIFT` + arrows | Nudge the focused window one grid step; hold to keep moving. |
+| `SUPER + T` | Make the focused window fill its screen; again puts it back. (Floating/tiling means nothing on the canvas.) |
+| `SUPER + F`, or an app going fullscreen | Fullscreen on the screen the window is shown on. Only that screen leaves the canvas, and comes back as it was. |
 | Middle-drag | Pan the canvas. |
 | `CTRL` + wheel, pinch | Zoom. |
 | `SUPER` + left-drag, right-drag | Move, resize a window. |
@@ -170,7 +172,7 @@ Everything can also be set in `~/.config/hypr/spatialoverview.lua` (then
 color.
 
 For scripts and bindings, `hl.plugin.spatialoverview.canvas(...)` takes
-`search [text]`, `tune`, `switch next|prev`, `fit`, `summon`, `zoom in|out`,
+`search [text]`, `tune`, `fill`, `switch next|prev`, `fit`, `summon`, `zoom in|out`,
 `pan <dir>`, `nudge <dir>`, `undo`, `redo`, `arrange`, `frame`, `land`, `back`
 and `refresh`.
 

@@ -111,6 +111,33 @@ static std::vector<std::vector<SCanvasSavedWindow>> g_canvasUndo;
 static std::vector<std::vector<SCanvasSavedWindow>> g_canvasRedo;
 static bool g_canvasRestoring = false;
 static std::unordered_map<std::string, Vector2D> g_canvasCameraBookmarks;
+// Windows fullscreen on a screen whose canvas stepped aside for them (see
+// "Fullscreen on the canvas").
+struct SCanvasFullscreen {
+    PHLWINDOWREF        window;
+    PHLMONITORREF       monitor;
+    std::optional<CBox> request; // what an X11 app last asked for meanwhile (X11 coordinates)
+    std::optional<CBox> before;  // where it was before, as the canvas last drew it
+};
+static std::vector<SCanvasFullscreen> g_canvasFullscreen;
+static bool canvasFullscreenWindow(const PHLWINDOW& window) {
+    return window && std::ranges::any_of(g_canvasFullscreen, [&window](const auto& entry) { return entry.window.lock() == window; });
+}
+// Each window's box when the canvas last drew it outside fullscreen. After
+// fullscreen Hyprland centers a floating window on its monitor; the canvas
+// puts it back there instead.
+struct SCanvasWindowedBox {
+    PHLWINDOWREF window;
+    CBox         box;
+};
+static std::unordered_map<const Desktop::View::CWindow*, SCanvasWindowedBox> g_canvasWindowedBox;
+static void noteCanvasWindowedBox(const PHLWINDOW& window) {
+    if (Fullscreen::controller()->isFullscreen(window))
+        return;
+    if (g_canvasWindowedBox.size() > 256)
+        std::erase_if(g_canvasWindowedBox, [](const auto& entry) { return !entry.second.window.lock(); });
+    g_canvasWindowedBox[window.get()] = {.window = window, .box = CBox{window->m_realPosition->goal(), window->m_realSize->goal()}};
+}
 // The first canvas of a compositor session restores remembered homes for a
 // short while, so apps started at login find their places as they appear.
 static bool            g_canvasMemoryStarted     = false;
@@ -423,6 +450,10 @@ static bool shouldShowOverviewWindow(const PHLWINDOW& window) {
     if (WINDOW->m_isX11 && WINDOW->isX11OverrideRedirect())
         return false;
 
+    // Fullscreen on a screen of its own: Hyprland shows it there, natively.
+    if (canvasFullscreenWindow(WINDOW))
+        return false;
+
     return true;
 }
 
@@ -680,6 +711,8 @@ static void beginNavigatorSession() {
 
 // Every monitor enters and leaves navigation together, but one at a time;
 // the session ends when the last camera is back at 100%.
+static void canvasFullscreenReturnCheck();
+
 static void endNavigatorSessionIfIdle() {
     if (!SpatialOverview::Navigator::isOpen())
         return;
@@ -689,6 +722,7 @@ static void endNavigatorSessionIfIdle() {
             return;
     }
     SpatialOverview::Navigator::end();
+    canvasFullscreenReturnCheck();
 }
 
 // A quick Alt+Tab switches straight away; holding Alt past this delay opens
@@ -1384,13 +1418,15 @@ CScrollOverview::~CScrollOverview() {
     restoreForcedWindowVisibility();
     restoreForcedLayerVisibility();
     images.clear(); // otherwise we get a vram leak
-    if (isCanvasDesktop() && MONITOR) g_canvasCameraBookmarks[MONITOR->m_name] = viewOffset->value();
+    // Where the camera was heading: a canvas can close mid-glide (a window going
+    // fullscreen right after landing on it).
+    if (isCanvasDesktop() && MONITOR) g_canvasCameraBookmarks[MONITOR->m_name] = viewOffset->goal();
     endNavigatorSessionIfIdle();
     if (scrollOverviews().empty()) {
         // Re-tiling while an output is being torn down trips the layout's
         // invariants. The windows stay floating; reopening the canvas or
         // closing it normally later restores them as usual.
-        if (!g_overviewMonitorTeardown)
+        if (!g_overviewMonitorTeardown && g_canvasFullscreen.empty())
             restoreCanvasNativeLayout();
         canvasReleaseX11Windows();
         restoreActiveWorkspaceVisibility();
@@ -2170,10 +2206,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         if (!window || window->m_monitor != pMonitor || !Fullscreen::controller()->isFullscreen(window))
             return;
 
-        if (isCanvasDesktop()) {
-            requestFlightDeckNative(window, Fullscreen::controller()->getFullscreenModes(window).internal);
-            return;
-        }
+        if (isCanvasDesktop())
+            return; // canvasOnWindowFullscreen
         emitFullscreenVisibilityState(window, true);
     };
 
@@ -3495,6 +3529,7 @@ struct SX11Sync {
     Vector2D      sent;   // X11 position last reported
     Vector2D      offset; // reported minus real, in X11 coordinates
     bool          valid = false;
+    PHLMONITORREF covers; // the monitor the app last asked to cover exactly
 };
 static std::unordered_map<const Desktop::View::CWindow*, SX11Sync> g_x11Sync;
 
@@ -3523,7 +3558,7 @@ static std::optional<Vector2D> canvasX11DrawnPosition(const PHLWINDOW& window) {
     double           best   = 0.0;
     for (const auto& overview : scrollOverviews()) {
         auto* canvas = canvasOf(overview);
-        if (!canvas)
+        if (!canvas || !canvas->canvasAtRestZoom())
             continue;
         const auto BOX = canvas->canvasDrawnGlobalBox(window);
         if (BOX.empty())
@@ -3542,6 +3577,10 @@ static std::optional<Vector2D> canvasX11DrawnPosition(const PHLWINDOW& window) {
         return std::nullopt;
     const auto POS = g_pXWaylandManager->waylandToXWaylandCoords(chosen->canvasDrawnGlobalBox(window).pos(), chosen->canvasMonitor());
     return Vector2D{std::round(POS.x), std::round(POS.y)};
+}
+
+bool CScrollOverview::canvasAtRestZoom() const {
+    return std::abs(scale->value() - 1.F) < 0.001F;
 }
 
 CBox CScrollOverview::canvasDrawnGlobalBox(const PHLWINDOW& window) const {
@@ -3579,9 +3618,15 @@ CBox canvasX11Configure(void* surface, const CBox& box) {
         return box;
     const auto DRAWN = canvasX11DrawnPosition(window);
     if (!DRAWN) {
-        if (auto* sync = x11Sync(window, false))
-            sync->valid = false;
-        return box;
+        // Not shown 1:1 anywhere (zoomed out, or off screen): the app keeps
+        // the position it last had. Jumping to the real one, which is often
+        // on no monitor, or to a zoomed-out spot would have it change
+        // monitors, and a game its resolution, as the camera moves.
+        auto* sync = x11Sync(window, false);
+        if (!sync || !sync->valid)
+            return box;
+        sync->offset = sync->sent - box.pos();
+        return CBox{sync->sent, box.size()};
     }
     auto* sync   = x11Sync(window, true);
     sync->sent   = *DRAWN;
@@ -3593,9 +3638,29 @@ CBox canvasX11Configure(void* surface, const CBox& box) {
 // An X11 app asks to be put somewhere, in the coordinates it was given (hooked).
 CBox canvasX11Request(void* windowPtr, CBox box) {
     const auto* WINDOW = sc<Desktop::View::CWindow*>(windowPtr);
+    // Hyprland ignores what a fullscreen window asks for, and a game leaving
+    // fullscreen asks for its windowed size before it is out. Keep it for
+    // when its screen's canvas is back.
+    for (auto& entry : g_canvasFullscreen) {
+        if (entry.window.lock().get() == WINDOW) {
+            entry.request = box;
+            return box;
+        }
+    }
     const auto  IT     = WINDOW ? g_x11Sync.find(WINDOW) : g_x11Sync.end();
-    if (IT == g_x11Sync.end() || !IT->second.valid || IT->second.window.lock().get() != WINDOW)
+    if (IT == g_x11Sync.end() || !IT->second.valid || IT->second.window.lock().get() != WINDOW || !canvasManagesX11(IT->second.window.lock()))
         return box;
+    // A game going borderless fullscreen first asks to cover its monitor
+    // exactly: that is the screen it means (see canvasScreenOf).
+    const auto SYNCED = IT->second.window.lock();
+    const CBox SCREEN{SYNCED->xwaylandPositionToReal(box.pos()), SYNCED->xwaylandSizeToReal(box.size())};
+    IT->second.covers.reset();
+    for (const auto& monitor : State::monitorState()->monitors()) {
+        const auto MONITORBOX = monitor ? monitor->logicalBox() : CBox{};
+        if (monitor && std::abs(SCREEN.x - MONITORBOX.x) < 1.5 && std::abs(SCREEN.y - MONITORBOX.y) < 1.5 && std::abs(SCREEN.width - MONITORBOX.width) < 1.5 &&
+            std::abs(SCREEN.height - MONITORBOX.height) < 1.5)
+            IT->second.covers = monitor;
+    }
     box.x -= IT->second.offset.x;
     box.y -= IT->second.offset.y;
     return box;
@@ -3626,6 +3691,331 @@ void canvasReleaseX11Windows() {
     g_x11Sync.clear();
     for (const auto& window : windows)
         window->sendWindowSize(true);
+}
+
+// ---- Fullscreen on the canvas -----------------------------------------------------
+// A window that goes fullscreen (a game, a video, Super+F) fills the screen
+// the canvas shows it on. Only that screen's canvas steps aside, nothing is
+// re-tiled, and it comes back with its camera when the window leaves
+// fullscreen, closes, or its workspace leaves that screen. Other screens keep
+// their canvas. Wine games in borderless "windowed fullscreen" ask for
+// fullscreen themselves once they cover a monitor.
+bool openCanvasOverview(PHLMONITOR monitor); // main.cpp
+
+static std::vector<SCanvasFullscreen> g_canvasFullscreenPending;
+static wl_event_source*               g_canvasFullscreenIdle     = nullptr;
+static bool                           g_canvasFullscreenApplying = false;
+
+static PHLMONITOR monitorAt(const Vector2D& point) {
+    PHLMONITOR nearest;
+    double     best = INFINITY;
+    for (const auto& monitor : State::monitorState()->monitors()) {
+        if (!monitor || !monitor->m_enabled)
+            continue;
+        const auto BOX = monitor->logicalBox();
+        if (BOX.containsPoint(point))
+            return monitor;
+        const double D = BOX.closestPoint(point).distanceSq(point);
+        if (D < best) {
+            best    = D;
+            nearest = monitor;
+        }
+    }
+    return nearest;
+}
+
+// The screen a window is shown on. An X11 app means the monitor it asked to
+// cover, else the one it was told it is on; otherwise the canvas under the pointer if it shows the
+// window, else the one showing most of it.
+static PHLMONITOR canvasScreenOf(const PHLWINDOW& window) {
+    if (window->m_isX11) {
+        if (const auto* SYNC = x11Sync(window, false); SYNC && SYNC->valid) {
+            if (const auto COVERS = SYNC->covers.lock(); COVERS && canvasOf(scrollOverviewForMonitor(COVERS)))
+                return COVERS;
+            const auto MONITOR = monitorAt(g_pXWaylandManager->xwaylandToWaylandCoords(SYNC->sent) + window->m_realSize->goal() / 2.0);
+            if (MONITOR && canvasOf(scrollOverviewForMonitor(MONITOR)))
+                return MONITOR;
+        }
+    }
+    const auto CURSOR = g_pInputManager->getMouseCoordsInternal();
+    PHLMONITOR chosen;
+    double     best = 0.0;
+    for (const auto& overview : scrollOverviews()) {
+        const auto* CANVAS  = canvasOf(overview);
+        const auto  MONITOR = CANVAS ? CANVAS->canvasMonitor() : nullptr;
+        if (!MONITOR)
+            continue;
+        const auto VISIBLE = CANVAS->canvasDrawnGlobalBox(window).intersection(MONITOR->logicalBox());
+        const auto AREA    = VISIBLE.width * VISIBLE.height;
+        if (AREA <= 0.0)
+            continue;
+        if (MONITOR->logicalBox().containsPoint(CURSOR))
+            return MONITOR;
+        if (AREA > best) {
+            best   = AREA;
+            chosen = MONITOR;
+        }
+    }
+    if (chosen)
+        return chosen;
+    const auto OWN = window->m_monitor.lock();
+    return OWN && canvasOf(scrollOverviewForMonitor(OWN)) ? OWN : nullptr;
+}
+
+static void canvasFullscreenStepAside(const PHLWINDOW& window, const PHLMONITOR& monitor) {
+    auto* canvas = canvasOf(scrollOverviewForMonitor(monitor));
+    if (!canvas || !canvas->isCanvasDesktop() || canvas->isClosing())
+        return;
+
+    g_canvasFullscreenApplying = true;
+    // Fullscreen happens on the window's own workspace and monitor; bring it
+    // to the screen it was shown on first. (When an X11 app moves itself onto
+    // another screen's workspace, Hyprland can leave its monitor behind.)
+    if (const auto WORKSPACE = monitor->m_activeWorkspace; WORKSPACE && (window->m_workspace != WORKSPACE || window->m_monitor != monitor)) {
+        const auto MODES = Fullscreen::controller()->getFullscreenModes(window);
+        Fullscreen::controller()->setFullscreenMode(window, Fullscreen::FSMODE_NONE, Fullscreen::FSMODE_NONE);
+        moveCanvasWindowToWorkspace(window, WORKSPACE);
+        window->m_monitor = monitor;
+        Fullscreen::controller()->setFullscreenMode(window, MODES.internal, MODES.client);
+    }
+    std::optional<CBox> before;
+    if (const auto IT = g_canvasWindowedBox.find(window.get()); IT != g_canvasWindowedBox.end() && IT->second.window.lock() == window)
+        before = IT->second.box;
+    g_canvasFullscreen.push_back({.window = window, .monitor = monitor, .before = before});
+    removeOverview(canvas);
+    g_canvasFullscreenApplying = false;
+
+    Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+    window->sendWindowSize(true);
+}
+
+static void canvasPlaceAfterFullscreen(const SCanvasFullscreen& entry, CScrollOverview* canvas, const PHLWINDOW& WINDOW, const PHLMONITOR& MONITOR);
+
+static void canvasFullscreenComeBack(const SCanvasFullscreen& entry) {
+    const auto WINDOW  = entry.window.lock();
+    const auto MONITOR = entry.monitor.lock();
+    const bool FOCUSED = WINDOW && Desktop::focusState()->window() == WINDOW;
+    if (!MONITOR || scrollOverviewForMonitor(MONITOR) || !openCanvasOverview(MONITOR))
+        return;
+    auto*      canvas = canvasOf(scrollOverviewForMonitor(MONITOR));
+    const auto TARGET = validMapped(WINDOW) ? WINDOW->layoutTarget() : nullptr;
+    if (!canvas || !TARGET || WINDOW->m_workspace != MONITOR->m_activeWorkspace || Fullscreen::controller()->isFullscreen(WINDOW))
+        return;
+    // The keyboard stays with the window that left fullscreen, not with
+    // whatever the reopened canvas had selected.
+    auto keepFocus = Hyprutils::Utils::CScopeGuard([canvas, WINDOW, FOCUSED] {
+        if (!FOCUSED)
+            return;
+        if (Desktop::focusState()->window() != WINDOW)
+            Desktop::focusState()->fullWindowFocus(WINDOW, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+        canvas->canvasAdoptFocus(WINDOW);
+    });
+    canvasPlaceAfterFullscreen(entry, canvas, WINDOW, MONITOR);
+}
+
+// Where a window that left fullscreen goes on its screen's canvas.
+static void canvasPlaceAfterFullscreen(const SCanvasFullscreen& entry, CScrollOverview* canvas, const PHLWINDOW& WINDOW, const PHLMONITOR& MONITOR) {
+    const auto TARGET = WINDOW->layoutTarget();
+    if (!TARGET)
+        return;
+    // Back from fullscreen: an X11 app gets what it asked for meanwhile, on
+    // the screen as the canvas shows it.
+    if (entry.request) {
+        const CBox SCREEN{WINDOW->xwaylandPositionToReal(entry.request->pos()), WINDOW->xwaylandSizeToReal(entry.request->size())};
+        if (const auto WORLD = canvas->canvasScreenToWorld(SCREEN)) {
+            TARGET->rememberFloatingSize(SCREEN.size());
+            TARGET->setPositionGlobal(CBox{WORLD->pos(), SCREEN.size()});
+            TARGET->warpPositionSize();
+            WINDOW->sendWindowSize(true);
+        }
+        return;
+    }
+    // Everything else goes back where it was.
+    if (entry.before) {
+        TARGET->rememberFloatingSize(entry.before->size());
+        TARGET->setPositionGlobal(*entry.before);
+        TARGET->warpPositionSize();
+        WINDOW->sendWindowSize(true);
+        return;
+    }
+    if (canvas->canvasDrawsWindow(WINDOW))
+        return;
+    // Never drawn before: if it put itself at a screen position meanwhile,
+    // while nothing translated it, show it there.
+    const auto SCREEN = MONITOR->logicalBox();
+    auto       box    = WINDOW->getWindowMainSurfaceBox();
+    box.x             = std::clamp(box.x, SCREEN.x, std::max(SCREEN.x, SCREEN.x + SCREEN.width - box.width));
+    box.y             = std::clamp(box.y, SCREEN.y, std::max(SCREEN.y, SCREEN.y + SCREEN.height - box.height));
+    if (const auto WORLD = canvas->canvasScreenToWorld(box)) {
+        TARGET->setPositionGlobal(CBox{WORLD->pos(), box.size()});
+        TARGET->warpPositionSize();
+    }
+}
+
+static void canvasFullscreenCheck(void*) {
+    g_canvasFullscreenIdle = nullptr;
+    if (g_canvasRestoring)
+        return;
+
+    auto pending = std::move(g_canvasFullscreenPending);
+    g_canvasFullscreenPending.clear();
+    for (const auto& request : pending) {
+        const auto WINDOW  = request.window.lock();
+        const auto MONITOR = request.monitor.lock();
+        if (validMapped(WINDOW) && MONITOR && Fullscreen::controller()->isFullscreen(WINDOW) && !canvasFullscreenWindow(WINDOW))
+            canvasFullscreenStepAside(WINDOW, MONITOR);
+    }
+
+    std::vector<SCanvasFullscreen> done;
+    std::erase_if(g_canvasFullscreen, [&done](const auto& entry) {
+        const auto WINDOW  = entry.window.lock();
+        const auto MONITOR = entry.monitor.lock();
+        const bool OVER    = !validMapped(WINDOW) || !MONITOR || !Fullscreen::controller()->isFullscreen(WINDOW) || WINDOW->m_workspace != MONITOR->m_activeWorkspace;
+        if (OVER)
+            done.push_back(entry);
+        return OVER;
+    });
+    for (const auto& entry : done)
+        canvasFullscreenComeBack(entry);
+}
+
+// Opening the canvas on a screen a fullscreen window has to itself (Super+
+// Ctrl+G) takes the screen back: the window leaves fullscreen and is on the
+// canvas where it was, where it can be seen and picked. Going back to it
+// right away (it is focused when the navigator closes) makes it fullscreen
+// again. Called by main.cpp once that screen's canvas is open.
+struct SCanvasFullscreenReturn {
+    PHLWINDOWREF                window;
+    Fullscreen::SFullscreenMode modes;
+};
+static std::optional<SCanvasFullscreenReturn> g_canvasFullscreenReturn;
+static wl_event_source*                       g_canvasFullscreenReturnIdle = nullptr;
+
+void canvasReclaimScreen(const PHLMONITOR& monitor) {
+    const auto IT = std::ranges::find_if(g_canvasFullscreen, [&monitor](const auto& entry) { return entry.monitor.lock() == monitor; });
+    if (IT == g_canvasFullscreen.end())
+        return;
+    const auto ENTRY  = *IT;
+    const auto WINDOW = ENTRY.window.lock();
+    g_canvasFullscreen.erase(IT);
+    auto* canvas = canvasOf(scrollOverviewForMonitor(monitor));
+    if (!canvas || !validMapped(WINDOW) || !Fullscreen::controller()->isFullscreen(WINDOW))
+        return;
+    g_canvasFullscreenReturn   = SCanvasFullscreenReturn{.window = WINDOW, .modes = Fullscreen::controller()->getFullscreenModes(WINDOW)};
+    g_canvasFullscreenApplying = true;
+    Fullscreen::controller()->setFullscreenMode(WINDOW, Fullscreen::FSMODE_NONE, Fullscreen::FSMODE_NONE);
+    g_canvasFullscreenApplying = false;
+    canvasPlaceAfterFullscreen(ENTRY, canvas, WINDOW, monitor);
+}
+
+static void canvasFullscreenReturnCheck() {
+    if (!g_canvasFullscreenReturn || g_canvasFullscreenReturnIdle || !g_pCompositor)
+        return;
+    const auto RETURN = *g_canvasFullscreenReturn;
+    const auto WINDOW = RETURN.window.lock();
+    if (!validMapped(WINDOW) || getOverviewWindowToShow(Desktop::focusState()->window()) != WINDOW || Fullscreen::controller()->isFullscreen(WINDOW)) {
+        g_canvasFullscreenReturn.reset();
+        return;
+    }
+    // Not from inside the canvas's own callbacks.
+    g_canvasFullscreenReturnIdle = wl_event_loop_add_idle(
+        g_pCompositor->m_wlEventLoop,
+        [](void*) {
+            g_canvasFullscreenReturnIdle = nullptr;
+            const auto RETURN            = std::exchange(g_canvasFullscreenReturn, std::nullopt);
+            const auto WINDOW            = RETURN ? RETURN->window.lock() : nullptr;
+            if (validMapped(WINDOW) && !Fullscreen::controller()->isFullscreen(WINDOW))
+                Fullscreen::controller()->setFullscreenMode(WINDOW, RETURN->modes.internal, RETURN->modes.client);
+        },
+        nullptr);
+}
+
+// While the focused screen's canvas has stepped aside, no canvas is the
+// active one: focus and keys there are the fullscreen window's.
+bool canvasSteppedAside(const PHLMONITOR& monitor) {
+    return monitor && std::ranges::any_of(g_canvasFullscreen, [&monitor](const auto& entry) { return entry.monitor.lock() == monitor; });
+}
+
+// Window and workspace events, from main.cpp.
+void canvasFullscreenEvent(PHLWINDOW window) {
+    if (g_canvasFullscreenApplying || g_canvasRestoring)
+        return;
+    window = getOverviewWindowToShow(window);
+    if (window && Fullscreen::controller()->isFullscreen(window) && shouldShowOverviewWindow(window)) {
+        if (const auto MONITOR = canvasScreenOf(window))
+            g_canvasFullscreenPending.push_back({window, MONITOR});
+    }
+    if (g_canvasFullscreenPending.empty() && g_canvasFullscreen.empty())
+        return;
+    if (!g_canvasFullscreenIdle && g_pCompositor)
+        g_canvasFullscreenIdle = wl_event_loop_add_idle(g_pCompositor->m_wlEventLoop, canvasFullscreenCheck, nullptr);
+}
+
+void canvasFullscreenReset() {
+    if (g_canvasFullscreenIdle)
+        wl_event_source_remove(g_canvasFullscreenIdle);
+    g_canvasFullscreenIdle = nullptr;
+    if (g_canvasFullscreenReturnIdle)
+        wl_event_source_remove(g_canvasFullscreenReturnIdle);
+    g_canvasFullscreenReturnIdle = nullptr;
+    g_canvasFullscreenReturn.reset();
+    g_canvasFullscreenPending.clear();
+    g_canvasFullscreen.clear();
+    g_canvasWindowedBox.clear();
+}
+
+// ---- Fill the screen (Super+T on the canvas) ---------------------------------------
+// Everything floats on the canvas, so the float/tile toggle has nothing to
+// do there. Instead the window fills the screen it is shown on, 1:1 and
+// minus bars; again puts it back where and how big it was.
+struct SCanvasFill {
+    PHLWINDOWREF window;
+    CBox         before;
+    CBox         filled;
+};
+static std::unordered_map<const Desktop::View::CWindow*, SCanvasFill> g_canvasFill;
+
+// False only when no canvas desktop is running (the key then does what it
+// does without the canvas); a window it can't fill is left as it is.
+bool canvasToggleFill(PHLWINDOW window) {
+    if (std::ranges::none_of(scrollOverviews(), [](const auto& overview) {
+            const auto* CANVAS = canvasOf(overview);
+            return CANVAS && CANVAS->isCanvasDesktop() && !CANVAS->isClosing();
+        }))
+        return false;
+
+    window            = getOverviewWindowToShow(window);
+    const auto TARGET = window ? window->layoutTarget() : nullptr;
+    if (!shouldShowOverviewWindow(window) || !TARGET || !TARGET->floating() || window->m_pinned || Fullscreen::controller()->isFullscreen(window))
+        return true;
+
+    const auto NOW = CBox{window->m_realPosition->goal(), window->m_realSize->goal()};
+    if (const auto IT = g_canvasFill.find(window.get()); IT != g_canvasFill.end()) {
+        const auto ENTRY = IT->second;
+        g_canvasFill.erase(IT);
+        // Moved or resized since: fill again rather than jump back.
+        if (ENTRY.window.lock() == window && NOW.pos().distanceSq(ENTRY.filled.pos()) < 1.0 && NOW.size().distanceSq(ENTRY.filled.size()) < 1.0) {
+            TARGET->rememberFloatingSize(ENTRY.before.size());
+            TARGET->setPositionGlobal(ENTRY.before);
+            TARGET->warpPositionSize();
+            window->sendWindowSize(true);
+            return true;
+        }
+    }
+
+    const auto MONITOR = canvasScreenOf(window);
+    auto*      canvas  = MONITOR ? canvasOf(scrollOverviewForMonitor(MONITOR)) : nullptr;
+    const auto USABLE  = MONITOR ? MONITOR->logicalBoxMinusReserved() : CBox{};
+    const auto WORLD   = canvas ? canvas->canvasScreenToWorld(USABLE) : std::nullopt;
+    if (!WORLD)
+        return true;
+    const CBox FILLED{WORLD->pos(), USABLE.size()};
+    g_canvasFill[window.get()] = {.window = window, .before = NOW, .filled = FILLED};
+    TARGET->rememberFloatingSize(FILLED.size());
+    TARGET->setPositionGlobal(FILLED);
+    TARGET->warpPositionSize();
+    window->sendWindowSize(true);
+    return true;
 }
 
 // Where a canvas window's popups must stay: the screen as the canvas that
@@ -5706,6 +6096,14 @@ void CScrollOverview::syncSelectionToViewport() {
         Desktop::focusState()->fullWindowFocus(nullptr, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 }
 
+void CScrollOverview::canvasAdoptFocus(const PHLWINDOW& window) {
+    if (!shouldShowOverviewWindow(window))
+        return;
+    closeOnWindow = window;
+    rememberSelection(window);
+    syncFocusedSelection();
+}
+
 void CScrollOverview::syncFocusedSelection() {
     const auto window = getOverviewWindowToShow(closeOnWindow.lock());
     if (!shouldShowOverviewWindow(window))
@@ -6150,14 +6548,20 @@ void CScrollOverview::restoreForcedLayerVisibility() {
         if (!entry.layer)
             continue;
 
-        entry.layer->m_aboveFullscreen = entry.aboveFullscreen;
-
 		auto& entryLsAlpha = entry.layer->alpha()[Desktop::View::LS_ALPHA_FADE];
         const auto MONITOR = entry.layer->m_monitor.lock();
         if (!MONITOR) {
+            entry.layer->m_aboveFullscreen = entry.aboveFullscreen;
             entryLsAlpha->setValueAndWarp(entry.alpha);
             continue;
         }
+
+        // What Hyprland sets when a window goes fullscreen (the canvas held
+        // it off while it drew): layers stay above windows only while the
+        // screen has no fullscreen window. The value saved when the canvas
+        // opened may predate a fullscreen window, and would keep the bar on
+        // top of it.
+        entry.layer->m_aboveFullscreen = !Fullscreen::controller()->hasFullscreen(MONITOR->m_activeWorkspace);
 
         const bool fullscreen = Fullscreen::controller()->hasFullscreen(MONITOR);
         const bool visible    = !fullscreen || entry.layer->m_layer >= ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY || entry.layer->m_aboveFullscreen;
@@ -6931,6 +7335,7 @@ void CScrollOverview::renderCanvasDesktopScene(PHLMONITOR monitor, float renderS
             if (!overviewBoxIntersectsMonitor(WINDOWBOX, monitor))
                 continue;
 
+            noteCanvasWindowedBox(WINDOW);
             renderWindowLive(monitor, WINDOW, WINDOWBOX, renderScale, now);
             renderNavigatorWindowOverlay(monitor, WINDOW, WINDOWBOX);
         }

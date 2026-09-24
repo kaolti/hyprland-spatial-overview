@@ -256,6 +256,14 @@ for _, move in ipairs({
   }), { repeating = true })
 end
 
+-- On the canvas floating/tiling means nothing, so SUPER + T makes the focused
+-- window fill the screen it is on instead; again puts it back. Tiled
+-- desktops toggle floating.
+hl.unbind("SUPER + T")
+bind("SUPER + T", "Fill screen (canvas) / toggle floating", canvas_or("fill", {
+  hl.dsp.window.float({ action = "toggle" }),
+}))
+
 -- SUPER + arrows focus the nearest window that way; on the canvas the camera
 -- follows it.
 for _, move in ipairs({

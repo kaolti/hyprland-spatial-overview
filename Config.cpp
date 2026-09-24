@@ -71,9 +71,9 @@ SDispatcher* findDispatcher(const std::string_view name) {
         },
         {
             .name            = "canvas",
-            .argPattern      = std::regex{R"(^((place|viewport)[ \t]+-?[0-9]+[ \t]+-?[0-9]+|(area|send)[ \t]+[1-9][0-9]*|refresh|arrange|land|back|frame|undo|redo|fit|summon|tune|search([ \t]+[^"\\]+)?|zoom[ \t]+(in|out)|(pan|nudge)[ \t]+(left|right|up|down)|native|maximize|fullscreen|restore|experiment[ \t]+(baseline|landing|labels|alttab|areas|quiet|persist|depth|lens|all|next|prev|status)|alttab[ \t]+(next|prev)|switch[ \t]+(next|prev))$)"},
+            .argPattern      = std::regex{R"(^((place|viewport)[ \t]+-?[0-9]+[ \t]+-?[0-9]+|(area|send)[ \t]+[1-9][0-9]*|refresh|arrange|land|back|frame|undo|redo|fit|summon|tune|fill|search([ \t]+[^"\\]+)?|zoom[ \t]+(in|out)|(pan|nudge)[ \t]+(left|right|up|down)|native|maximize|fullscreen|restore|experiment[ \t]+(baseline|landing|labels|alttab|areas|quiet|persist|depth|lens|all|next|prev|status)|alttab[ \t]+(next|prev)|switch[ \t]+(next|prev))$)"},
             .typeArgError    = "expected a string argument",
-            .invalidArgError = "expected: search [text] | tune | fit | summon | zoom in|out | pan/nudge left|right|up|down | undo | redo | arrange | land | back | frame | place <column> <row> | viewport <x> <y> | area/send <id> | refresh | native | maximize | fullscreen | restore | experiment <name> | alttab next|prev | switch next|prev",
+            .invalidArgError = "expected: search [text] | tune | fill | fit | summon | zoom in|out | pan/nudge left|right|up|down | undo | redo | arrange | land | back | frame | place <column> <row> | viewport <x> <y> | area/send <id> | refresh | native | maximize | fullscreen | restore | experiment <name> | alttab next|prev | switch next|prev",
             .luaFunction     = [](lua_State* L) { return dispatcherFactoryLua(L, "canvas"); },
         },
     };

@@ -44,12 +44,17 @@ VPOINTER = .build/vpointer
 VPOINTER_PROTOCOL = tests/tools/wlr-virtual-pointer-unstable-v1.xml
 
 X11MENU = .build/x11-menu
+X11GAME = .build/x11-game
 
-test-tools: $(VPOINTER) $(X11MENU)
+test-tools: $(VPOINTER) $(X11MENU) $(X11GAME)
 
 $(X11MENU): tests/tools/x11-menu.c
 	@mkdir -p .build
 	$(CC) -O2 $< -lX11 -o $@
+
+$(X11GAME): tests/tools/x11-game.c
+	@mkdir -p .build
+	$(CC) -O2 $< -lX11 -lXrandr -o $@
 
 $(VPOINTER): tests/tools/vpointer.c $(VPOINTER_PROTOCOL)
 	@mkdir -p .build/vpointer-gen

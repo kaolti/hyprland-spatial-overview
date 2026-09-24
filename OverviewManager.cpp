@@ -29,10 +29,17 @@ SP<IOverview> scrollOverviewAt(const Vector2D& point) {
     return IT == g_scrollOverviews.end() ? SP<IOverview>{} : *IT;
 }
 
+bool canvasSteppedAside(const PHLMONITOR& monitor); // scrollOverview.cpp
+
 SP<IOverview> activeScrollOverview() {
     if (const auto monitor = Desktop::focusState()->monitor()) {
         if (const auto overview = scrollOverviewForMonitor(monitor))
             return overview;
+        // A fullscreen window has the focused screen to itself (its canvas
+        // stepped aside); the other screens' canvases must not take focus
+        // or keys from it.
+        if (canvasSteppedAside(monitor))
+            return {};
     }
 
     if (g_pScrollOverview && std::ranges::find(g_scrollOverviews, g_pScrollOverview) != g_scrollOverviews.end())

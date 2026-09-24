@@ -1,5 +1,5 @@
 """A native Wayland (GTK4) test window that prints every click with its
-window coordinates.
+window coordinates, and every key it gets.
 
 usage: wl-click.py TITLE
 """
@@ -7,7 +7,7 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
+from gi.repository import Gdk, Gtk
 
 
 def activate(app):
@@ -18,6 +18,9 @@ def activate(app):
     click = Gtk.GestureClick()
     click.connect("pressed", lambda _g, _n, x, y: print(f"click {x:.0f},{y:.0f}", flush=True))
     area.add_controller(click)
+    keys = Gtk.EventControllerKey()
+    keys.connect("key-pressed", lambda _c, keyval, _code, _state: print(f"key {Gdk.keyval_name(keyval)}", flush=True) or False)
+    win.add_controller(keys)
     win.set_child(area)
     win.present()
 
