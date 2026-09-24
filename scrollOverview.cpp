@@ -3456,6 +3456,23 @@ std::optional<CBox> CScrollOverview::canvasScreenToWorld(const CBox& screenGloba
     return CBox{MONITOR->m_position + HALF + viewOffset->value() + (P0 - HALF) / ZOOM, screenGlobal.size() / ZOOM};
 }
 
+// The canvas that paces a window's frames: the one on the window's own
+// monitor if it shows the window, else the first that does. One pacer, so a
+// window spanning two monitors isn't asked for frames twice per refresh.
+const CScrollOverview* CScrollOverview::canvasFrameOwner(const PHLWINDOW& window) {
+    const CScrollOverview* owner = nullptr;
+    for (const auto& overview : scrollOverviews()) {
+        const auto* CANVAS = canvasOf(overview);
+        if (!CANVAS || !CANVAS->canvasDrawsWindow(window))
+            continue;
+        if (CANVAS->pMonitor.lock() == window->m_monitor.lock())
+            return CANVAS;
+        if (!owner)
+            owner = CANVAS;
+    }
+    return owner;
+}
+
 bool CScrollOverview::canvasDrawsWindow(const PHLWINDOW& window) const {
     const auto MONITOR = pMonitor.lock();
     if (!MONITOR || !isCanvasDesktop() || closing)
@@ -7464,34 +7481,58 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
         sentThrottledWindowFrame = true;
     }
 
-    for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
-        const auto& workspaceImage = images[workspaceIdx];
-        if (!workspaceImage || !workspaceImage->pWorkspace)
-            continue;
-
-        const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
-        const auto WORKSPACEBOX     = getOverviewWorkspaceBox(MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
-        const auto VISIBLEBOX       = workspaceOverviewVisibleBox(workspaceIdx, WORKSPACEBOX, SCALE, MONITOR);
-        if (!overviewBoxIntersectsMonitor(VISIBLEBOX, MONITOR))
-            continue;
-
-        const auto workspace = workspaceImage->pWorkspace;
-        const bool REALTIME  = isSelectedWorkspace(workspace);
-        if (!isWorkspaceScrolling(workspace)) {
-            const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspace));
-            if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace) {
-                frameWindow(fullscreenWindow, WORKSPACEOFFSET, REALTIME);
-                for (const auto& windowRef : workspaceImage->windows) {
-                    const auto window = getOverviewWindowToShow(windowRef.lock());
-                    if (window && window->m_isFloating)
-                        frameWindow(window, WORKSPACEOFFSET, REALTIME);
-                }
+    // The canvas desktop: every window this canvas draws gets a frame on
+    // every refresh, as on a plain desktop (video pacing and audio/video sync
+    // depend on it). Windows no canvas shows are throttled, by the canvas of
+    // the monitor they belong to.
+    if (isCanvasDesktop()) {
+        for (const auto& windowRef : Desktop::windowState()->windows()) {
+            const auto window = getOverviewWindowToShow(windowRef);
+            if (!shouldShowOverviewWindow(window) || window->m_pinned)
                 continue;
+            const auto* OWNER = canvasFrameOwner(window);
+            if (OWNER != this && window != DRAGGED) {
+                if (OWNER || window->m_monitor != MONITOR)
+                    continue;
+                if (!CANFRAMETHROTTLEDWINDOWS) {
+                    scheduleRealtimePreviewFrame();
+                    continue;
+                }
+                sentThrottledWindowFrame = true;
             }
+            surfaceTreePresent(window->wlSurface() ? window->wlSurface()->resource() : nullptr, MONITOR, now);
+            popupTreePresent(window, MONITOR, now);
         }
+    } else {
+        for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+            const auto& workspaceImage = images[workspaceIdx];
+            if (!workspaceImage || !workspaceImage->pWorkspace)
+                continue;
 
-        for (const auto& windowRef : workspaceImage->windows) {
-            frameWindow(getOverviewWindowToShow(windowRef.lock()), WORKSPACEOFFSET, REALTIME);
+            const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
+            const auto WORKSPACEBOX     = getOverviewWorkspaceBox(MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+            const auto VISIBLEBOX       = workspaceOverviewVisibleBox(workspaceIdx, WORKSPACEBOX, SCALE, MONITOR);
+            if (!overviewBoxIntersectsMonitor(VISIBLEBOX, MONITOR))
+                continue;
+
+            const auto workspace = workspaceImage->pWorkspace;
+            const bool REALTIME  = isSelectedWorkspace(workspace);
+            if (!isWorkspaceScrolling(workspace)) {
+                const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspace));
+                if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace) {
+                    frameWindow(fullscreenWindow, WORKSPACEOFFSET, REALTIME);
+                    for (const auto& windowRef : workspaceImage->windows) {
+                        const auto window = getOverviewWindowToShow(windowRef.lock());
+                        if (window && window->m_isFloating)
+                            frameWindow(window, WORKSPACEOFFSET, REALTIME);
+                    }
+                    continue;
+                }
+            }
+
+            for (const auto& windowRef : workspaceImage->windows) {
+                frameWindow(getOverviewWindowToShow(windowRef.lock()), WORKSPACEOFFSET, REALTIME);
+            }
         }
     }
 
@@ -7547,6 +7588,18 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
     if (g_pointerGrabOverview && g_pointerGrabOverview->dragActiveWindow &&
         window == getOverviewWindowToShow(g_pointerGrabOverview->dragActiveWindow.lock()))
         return true;
+
+    // The canvas desktop: whatever a canvas draws gets its frames at that
+    // monitor's refresh (see sendOverviewFrameCallbacks). Windows no canvas
+    // shows only get the throttled ones.
+    if (isCanvasDesktop() && shouldShowOverviewWindow(window) && !window->m_pinned) {
+        if (canvasFrameOwner(window))
+            return true;
+        return std::ranges::any_of(scrollOverviews(), [](const auto& overview) {
+            const auto* CANVAS = canvasOf(overview);
+            return CANVAS && CANVAS->sendingOverviewFrameCallbacks;
+        });
+    }
 
     if (!window || window->m_monitor != MONITOR)
         return true;
@@ -7643,6 +7696,24 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
         if (!DRAGBOX.empty() && !DRAGBOX.intersection(MONITOR->logicalBox()).empty())
             damage();
         return true;
+    }
+
+    // The canvas desktop draws windows away from their real position, so the
+    // damage Hyprland would report lands where nothing shows the window.
+    // Instead every canvas showing it repaints, right away: a new frame from
+    // a video must reach the screen on the next refresh, also when it comes
+    // in while the previous one is still being shown (the redraw is then
+    // asked for again at the flip, which the frame pending flag lets
+    // through). This runs for the first canvas asked (the caller stops at the
+    // first false), so it does the work for all of them.
+    if (isCanvasDesktop() && shouldShowOverviewWindow(window) && !window->m_pinned && canvasFrameOwner(window)) {
+        for (const auto& overview : scrollOverviews()) {
+            if (auto* canvas = canvasOf(overview); canvas && canvas->canvasDrawsWindow(window)) {
+                canvas->selectedWorkspaceFramePending = true;
+                canvas->damage();
+            }
+        }
+        return false;
     }
 
     if (shouldShowPinnedFloatingOverviewWindow(window)) {

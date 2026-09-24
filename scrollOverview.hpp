@@ -97,6 +97,7 @@ class CScrollOverview : public IOverview {
     // real coordinates; nullopt when this is not a canvas desktop.
     std::optional<CBox> canvasScreenToWorld(const CBox& screenGlobal) const;
     bool                canvasDrawsWindow(const PHLWINDOW& window) const;
+    static const CScrollOverview* canvasFrameOwner(const PHLWINDOW& window);
     bool                canvasPopupFading() const;
     // X11 windows: where this canvas draws a window (global logical), and
     // making this canvas the one an X11 window reports its position from.
