@@ -37,8 +37,8 @@ def check(cond, msg):
         failures.append(msg)
 
 
-def frame(output):
-    raw = subprocess.run(["grim", "-o", output, "-t", "ppm", "-"], env=n.env(), capture_output=True, timeout=10).stdout
+def frame(output, cursor=False):
+    raw = subprocess.run(["grim", *(["-c"] if cursor else []), "-o", output, "-t", "ppm", "-"], env=n.env(), capture_output=True, timeout=10).stdout
     parts = raw.split(b"\n", 3)
     w, h = map(int, parts[1].split())
     return w, h, parts[3]
@@ -81,6 +81,15 @@ def bar_shown(output):
     w, h, px = frame(output)
     hits = sum(1 for x in range(0, w, 8) if abs(px[(10 * w + x) * 3] - 0xff) < 30 and px[(10 * w + x) * 3 + 1] < 40 and abs(px[(10 * w + x) * 3 + 2] - 0xff) < 30)
     return hits > (w // 8) * 0.5
+
+
+def game_cursor_at(output, x, y):
+    """Whether the game's own cursor (a solid cyan square) is drawn around
+    pixel x, y of an output, rather than the canvas's arrow."""
+    w, h, px = frame(output, cursor=True)
+    hits = sum(1 for dy in range(-6, 7, 3) for dx in range(-6, 7, 3)
+               if px[((y + dy) * w + x + dx) * 3] < 60 and px[((y + dy) * w + x + dx) * 3 + 1] > 190 and px[((y + dy) * w + x + dx) * 3 + 2] > 190)
+    return hits >= 12
 
 
 def typed(path, text, x11=False):
@@ -164,22 +173,40 @@ try:
     check(bar_shown("SECOND"), "the bar is back")
     check(json.loads(n.ctl("-j", "activewindow")).get("title") == "x11-game", "the game keeps the keyboard")
 
+    # -- the game's own cursor; SUPER + F on it, then it flashes for attention
+    # (a Wine game does when combat starts)
+    land("SECOND", "x11-game")
+    n.dispatch(f"hl.dsp.cursor.move({{x={LW + LW // 2}, y={LH // 2}}})"); time.sleep(0.6)
+    check(game_cursor_at("SECOND", 640, 360), "the game's own cursor shows on the canvas")
+    was_game = bbox(frame("SECOND"))
+    n.dispatch('hl.dsp.window.fullscreen({mode="fullscreen"})'); time.sleep(1.2)
+    check(client("x11-game")["fullscreen"] != 0, "SUPER + F: the game goes fullscreen")
+    game("attention")
+    c = client("x11-game")
+    print("  after attention:", c["at"], c["size"], "fullscreen", c["fullscreen"], c["fullscreenClient"])
+    check(c["fullscreen"] != 0, "flashing for attention keeps it fullscreen")
+    check(json.loads(n.ctl("-j", "activewindow")).get("title") == "x11-game", "and the keyboard")
+    check(game_cursor_at("SECOND", 640, 360), "fullscreen, the game's own cursor shows")
+    n.dispatch('hl.dsp.window.fullscreen({mode="fullscreen"})'); time.sleep(1.2)
+    back = bbox(frame("SECOND"))
+    check(client("x11-game")["fullscreen"] == 0 and back and was_game and all(abs(a - b) <= 4 for a, b in zip(back, was_game)),
+          f"SUPER + F again: back where it was (drawn {back}, was {was_game})")
+
     # -- Super+F on a Wayland window, on the other screen
     wl_before = client("wl-test")
     # (go to it on its screen; focusing it from outside the canvas would move
     # the camera of the screen its real position belongs to)
     land("WAYLAND-1", "wl-test")
-    was_right = bbox(frame("SECOND"))
+    n.dispatch(f"hl.dsp.cursor.move({{x={LW // 2}, y={LH // 2}}})"); time.sleep(0.3)   # the pointer where you work
+    left_before = frame("WAYLAND-1")
+    second_before = next(x for x in json.loads(n.ctl("spatialoverview"))["screens"] if x["monitor"] == "SECOND")
     n.dispatch('hl.dsp.window.fullscreen({mode="fullscreen"})'); time.sleep(1.2)
     c = client("wl-test")
     print("  wl-test fullscreen:", c["at"], c["size"], c["fullscreen"], "monitor", c["monitor"])
     check(c["fullscreen"] != 0 and tuple(c["size"]) == (LW, LH) and tuple(c["at"]) == (0, 0), "Super+F fills the screen it is shown on (WAYLAND-1)")
-    # (the game there loses focus, so compare where it is drawn, not pixels)
-    during = bbox(frame("SECOND"))
-    if not during:
-        subprocess.run(["grim", "-o", "SECOND", os.path.join(ROOT, ".build/shots-fullscreen", "second-during-superf.png")], env=n.env())
-        print("  clients:", [(c["title"][:12], c["at"], c["size"], c["workspace"]["name"], c["monitor"], c["fullscreen"]) for c in n.clients()])
-    check(during and was_right and all(abs(a - b) <= 2 for a, b in zip(during, was_right)), f"SECOND keeps its canvas (game drawn {during}, was {was_right})")
+    # (the game there loses focus, so compare the canvas state, not pixels)
+    second = next((x for x in json.loads(n.ctl("spatialoverview"))["screens"] if x["monitor"] == "SECOND"), None)
+    check(second and second["view"] == second_before["view"], f"SECOND keeps its canvas, as it was ({second} vs {second_before})")
     check(not bar_shown("WAYLAND-1"), "Super+F covers the bar")
     ok, got = typed(wl_log, "asd")
     check(ok, f"keys go to the fullscreen window (it got {got})")
@@ -207,7 +234,12 @@ try:
     n.shot("after-super-f")
     check(c["fullscreen"] == 0 and tuple(c["at"]) == tuple(wl_before["at"]) and tuple(c["size"]) == tuple(wl_before["size"]), "after fullscreen it is back where it was")
     check(json.loads(n.ctl("-j", "activewindow")).get("title") == "wl-test", "and it keeps the keyboard")
-    check(changed(before_left, frame("WAYLAND-1")) < 0.02, "and WAYLAND-1 shows the canvas as before")
+    left_after = frame("WAYLAND-1")
+    if changed(left_before, left_after) >= 0.02:
+        for name, image in (("left-before", left_before), ("left-after", left_after)):
+            w, h, px = image
+            open(os.path.join(ROOT, ".build/shots-fullscreen", name + ".ppm"), "wb").write(b"P6\n%d %d\n255\n" % (w, h) + px)
+    check(changed(left_before, left_after) < 0.02, f"and WAYLAND-1 shows the canvas as before ({changed(left_before, left_after):.3f} changed)")
     check(bar_shown("WAYLAND-1"), "with its bar")
 
     # -- Super+T: fill the screen, and back
@@ -215,10 +247,14 @@ try:
     was = bbox(frame("SECOND"))
     n.dispatch('hl.plugin.spatialoverview.canvas("fill")'); time.sleep(1.0)
     filled, state = bbox(frame("SECOND")), game_state()
-    top = round(next(m for m in json.loads(n.ctl("-j", "monitors")) if m["name"] == "SECOND")["reserved"][1] * SCALE)  # the bar, in pixels
-    print("  fill: drawn", filled, " X11 view", state, " bar", top)
-    check(filled and all(abs(a - b) <= 2 for a, b in zip(filled, (0, top, 1280, 720))), f"fill: the window fills its screen below the bar (drawn {filled})")
-    check(state and all(abs(a - b) <= 1 for a, b in zip(state[:4], (1280, top, 1280, 720 - top))), "fill: the app sees a window the size of the screen minus the bar")
+    bar = next(m for m in json.loads(n.ctl("-j", "monitors")) if m["name"] == "SECOND")["reserved"][1]      # logical
+    gap = int(n.ctl("getoption", "general:gaps_out").split(":")[1].split()[0])
+    border = int(n.ctl("getoption", "general:border_size").split()[1])
+    inset = gap + border
+    area = (round(inset * SCALE), round((bar + inset) * SCALE), 1280 - round(inset * SCALE), 720 - round(inset * SCALE))
+    print("  fill: drawn", filled, " X11 view", state, " expected", area)
+    check(filled and all(abs(a - b) <= 3 for a, b in zip(filled, area)), f"fill: the window fills its screen below the bar, with the gaps (drawn {filled})")
+    check(state and all(abs(a - b) <= 3 for a, b in zip(state[:4], (1280 + area[0], area[1], area[2] - area[0], area[3] - area[1]))), "fill: the app sees exactly that")
     n.dispatch('hl.plugin.spatialoverview.canvas("fill")'); time.sleep(1.0)
     back = bbox(frame("SECOND"))
     check(back and was and all(abs(a - b) <= 4 for a, b in zip(back, was)), f"fill again: back as it was ({back} vs {was})")

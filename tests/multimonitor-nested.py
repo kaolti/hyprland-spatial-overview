@@ -1,5 +1,6 @@
-"""Two monitors, each a camera on the one canvas: a window drawn on both at
-once must take clicks on either copy, X11 (XWayland) and native Wayland alike.
+"""Two monitors with independent cameras (canvas.linked_screens = false): a
+window drawn on both at once must take clicks on either copy, X11 (XWayland)
+and native Wayland alike.
 
 usage: tests/multimonitor-nested.py [PLUGIN.so]   (default .build/dev/spatialoverview.so)
 """
@@ -14,6 +15,8 @@ subprocess.run(["make", "-s", "-C", ROOT, "test-tools"], check=True)
 logs = {name: tempfile.mktemp(prefix=f"{name}-", suffix=".log") for name in ("x11", "wayland")}
 n = nav.Nested(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, ".build/dev/spatialoverview.so"), os.path.join(ROOT, ".build/shots-mm2"),
                extra_lua='\nhl.config({xwayland={force_zero_scaling=true}})\n'
+                         # independent cameras: the same window can be drawn on both screens
+                         'hl.config({plugin={spatialoverview={canvas={linked_screens=false}}}})\n'
                          'hl.monitor({ output = "WAYLAND-1", mode = "1280x720@60", position = "0x0", scale = 1 })\n'
                          'hl.monitor({ output = "SECOND", mode = "1280x720@60", position = "1280x0", scale = 1 })\n')
 failures = []

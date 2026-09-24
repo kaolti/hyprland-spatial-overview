@@ -264,6 +264,60 @@ bind("SUPER + T", "Fill screen (canvas) / toggle floating", canvas_or("fill", {
   hl.dsp.window.float({ action = "toggle" }),
 }))
 
+-- Keys that tile, group, pop windows out or move workspaces between monitors
+-- mean something else on the canvas, where every window floats and the
+-- screens are one desk: SUPER + O pins the window where it is on the screen
+-- (again puts it back on the canvas), SUPER + ALT + F fills the screen like
+-- SUPER + T, and the tiling and grouping keys do nothing. Without the canvas
+-- they work as before.
+local canvas_keys = {
+  { "SUPER + O", "Pin to the screen (canvas) / pop window out", "pin", { hl.dsp.exec_cmd("omarchy-hyprland-window-pop") } },
+  { "SUPER + ALT + F", "Fill screen (canvas) / full width", "fill", { hl.dsp.window.fullscreen({ mode = "maximized" }) } },
+  { "SUPER + J", "Toggle window split", "noop", { hl.dsp.layout("togglesplit") } },
+  { "SUPER + P", "Pseudo window", "noop", { hl.dsp.window.pseudo() } },
+  { "SUPER + L", "Toggle workspace layout", "noop", { hl.dsp.exec_cmd("omarchy-hyprland-workspace-layout-toggle") } },
+  { "SUPER + Home", "Restore window width", "noop", { hl.dsp.exec_cmd("omarchy-hyprland-window-width restore") } },
+  { "SUPER + ALT + Home", "Save window width", "noop", { hl.dsp.exec_cmd("omarchy-hyprland-window-width save") } },
+}
+-- Groups neither: windows on the canvas stack freely, and a group made there
+-- crashes Hyprland when it quits. SUPER + ALT + G still takes a window out of
+-- a group.
+table.insert(canvas_keys, { "SUPER + G", "Toggle window grouping", "noop", { hl.dsp.group.toggle() } })
+for _, move in ipairs({ { "LEFT", "l", "left" }, { "RIGHT", "r", "right" }, { "UP", "u", "up" }, { "DOWN", "d", "down" } }) do
+  table.insert(canvas_keys, { "SUPER + SHIFT + ALT + " .. move[1], "Move workspace to " .. move[3] .. " monitor", "noop", { hl.dsp.workspace.move({ monitor = move[2] }) } })
+  table.insert(canvas_keys, { "SUPER + ALT + " .. move[1], "Move window to group on " .. move[3], "noop", { hl.dsp.window.move({ into_group = move[2] }) } })
+end
+for _, key in ipairs(canvas_keys) do
+  hl.unbind(key[1])
+  bind(key[1], key[2], canvas_or(key[3], key[4]))
+end
+
+-- Workspaces are places on the canvas: SUPER + 1…0 go to a place, SHIFT +
+-- SUPER + N sends the focused window there and follows it, SHIFT + ALT +
+-- SUPER + N sends it without following, SUPER + TAB / SHIFT + SUPER + TAB (and
+-- SUPER + scroll) step through the places that have windows, CTRL + SUPER +
+-- TAB goes back to the one before. Without the canvas they are workspaces.
+for place = 1, 10 do
+  local key = "code:" .. tostring(place + 9)
+  local ws = tostring(place)
+  hl.unbind("SUPER + " .. key)
+  bind("SUPER + " .. key, "Go to place " .. place .. " (canvas) / workspace " .. place, canvas_or("go " .. place, { hl.dsp.focus({ workspace = ws }) }))
+  hl.unbind("SUPER + SHIFT + " .. key)
+  bind("SUPER + SHIFT + " .. key, "Send window to place " .. place .. " (canvas) / workspace " .. place, canvas_or("send " .. place, { hl.dsp.window.move({ workspace = ws }) }))
+  hl.unbind("SUPER + SHIFT + ALT + " .. key)
+  bind("SUPER + SHIFT + ALT + " .. key, "Send window to place " .. place .. ", stay (canvas) / workspace " .. place .. " silently", canvas_or("send " .. place .. " stay", { hl.dsp.window.move({ workspace = ws, follow = false }) }))
+end
+for _, step in ipairs({
+  { "SUPER + TAB", "Next place (canvas) / workspace", "go next", "e+1" },
+  { "SUPER + SHIFT + TAB", "Previous place (canvas) / workspace", "go prev", "e-1" },
+  { "SUPER + CTRL + TAB", "Place before (canvas) / former workspace", "go back", "previous" },
+  { "SUPER + mouse_down", "Next place (canvas) / workspace", "go next", "e+1" },
+  { "SUPER + mouse_up", "Previous place (canvas) / workspace", "go prev", "e-1" },
+}) do
+  hl.unbind(step[1])
+  bind(step[1], step[2], canvas_or(step[3], { hl.dsp.focus({ workspace = step[4] }) }))
+end
+
 -- SUPER + arrows focus the nearest window that way; on the canvas the camera
 -- follows it.
 for _, move in ipairs({

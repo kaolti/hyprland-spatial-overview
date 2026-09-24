@@ -7,10 +7,15 @@
 //                 once a window covers a monitor ("windowed fullscreen")
 //   fullscreen    ask for _NET_WM_STATE_FULLSCREEN
 //   windowed W H  drop fullscreen, then be W x H, centered on its monitor
+//   attention     flash for attention (_NET_WM_STATE_DEMANDS_ATTENTION), as
+//                 Wine does for a game that wants to be noticed (combat)
+//   hidecursor    hide its cursor the way Wine does (mouse-look): an empty
+//                 1x1 cursor; showcursor brings the cyan one back
 //   report        print where it is
 //
 // It prints "at X Y W H monitor N fullscreen F" whenever that changes, and
-// "key NAME" for every key it gets.
+// "key NAME" for every key it gets. Its cursor is a solid cyan square, so a
+// screenshot shows whether its own cursor is on screen.
 //
 //   x11-game [TITLE] < commands
 #include <X11/Xatom.h>
@@ -24,7 +29,8 @@
 
 static Display* d;
 static Window   root, w;
-static Atom     NET_WM_STATE, NET_WM_STATE_FULLSCREEN;
+static Cursor   shown, hidden;
+static Atom     NET_WM_STATE, NET_WM_STATE_FULLSCREEN, NET_WM_STATE_DEMANDS_ATTENTION;
 
 struct rect {
     int x, y, w, h;
@@ -87,16 +93,20 @@ static int fullscreenState(void) {
     return fs;
 }
 
-static void askFullscreen(int on) {
+static void askState(int on, Atom state) {
     XEvent e                = {0};
     e.xclient.type          = ClientMessage;
     e.xclient.window        = w;
     e.xclient.message_type  = NET_WM_STATE;
     e.xclient.format        = 32;
     e.xclient.data.l[0]     = on ? 1 : 0;
-    e.xclient.data.l[1]     = NET_WM_STATE_FULLSCREEN;
+    e.xclient.data.l[1]     = state;
     e.xclient.data.l[3]     = 1;
     XSendEvent(d, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &e);
+}
+
+static void askFullscreen(int on) {
+    askState(on, NET_WM_STATE_FULLSCREEN);
 }
 
 static char last[256];
@@ -123,7 +133,13 @@ static void command(char* line) {
     else if (sscanf(line, "windowed %d %d", &width, &height) == 2) {
         askFullscreen(0);
         XMoveResizeWindow(d, w, mon.x + (mon.w - width) / 2, mon.y + (mon.h - height) / 2, width, height);
-    } else if (!strncmp(line, "report", 6))
+    } else if (!strncmp(line, "hidecursor", 10))
+        XDefineCursor(d, w, hidden);
+    else if (!strncmp(line, "showcursor", 10))
+        XDefineCursor(d, w, shown);
+    else if (!strncmp(line, "attention", 9))
+        askState(1, NET_WM_STATE_DEMANDS_ATTENTION);
+    else if (!strncmp(line, "report", 6))
         report(1);
     XFlush(d);
 }
@@ -135,7 +151,19 @@ int main(int argc, char** argv) {
     root                    = DefaultRootWindow(d);
     NET_WM_STATE            = XInternAtom(d, "_NET_WM_STATE", False);
     NET_WM_STATE_FULLSCREEN = XInternAtom(d, "_NET_WM_STATE_FULLSCREEN", False);
+    NET_WM_STATE_DEMANDS_ATTENTION = XInternAtom(d, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
     w                       = XCreateSimpleWindow(d, root, 40, 40, 800, 450, 0, 0, 0x2a5a08);
+    // a solid 24 px cyan square as its cursor
+    static char bits[24 * 24 / 8];
+    memset(bits, 0xff, sizeof bits);
+    const Pixmap shape = XCreateBitmapFromData(d, w, bits, 24, 24);
+    XColor       cyan = {.red = 0, .green = 0xffff, .blue = 0xffff}, black = {0};
+    shown = XCreatePixmapCursor(d, shape, shape, &cyan, &black, 12, 12);
+    XDefineCursor(d, w, shown);
+    // Wine's hidden cursor: an empty 1x1 one
+    static char none[1] = {0};
+    const Pixmap empty = XCreateBitmapFromData(d, w, none, 1, 1);
+    hidden             = XCreatePixmapCursor(d, empty, empty, &black, &black, 0, 0);
     XStoreName(d, w, argc > 1 ? argv[1] : "x11-game");
     XSelectInput(d, w, StructureNotifyMask | PropertyChangeMask | ExposureMask | KeyPressMask);
     XMapWindow(d, w);

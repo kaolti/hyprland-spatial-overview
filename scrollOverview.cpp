@@ -28,6 +28,8 @@
 #include <hyprland/src/config/shared/actions/ConfigActions.hpp>
 #include <hyprland/src/config/shared/animation/AnimationTree.hpp>
 #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
+#include <hyprland/src/protocols/PointerConstraints.hpp>
+#include <hyprland/src/pointer/PointerController.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/animation/AnimationManager.hpp>
 #include <hyprland/src/managers/EventManager.hpp>
@@ -111,6 +113,19 @@ static std::vector<std::vector<SCanvasSavedWindow>> g_canvasUndo;
 static std::vector<std::vector<SCanvasSavedWindow>> g_canvasRedo;
 static bool g_canvasRestoring = false;
 static std::unordered_map<std::string, Vector2D> g_canvasCameraBookmarks;
+static std::string g_canvasCursorShape; // the cursor override the canvases set; empty: none
+static const CScrollOverview* g_linkedLeader = nullptr; // linked screens: whose camera the others take
+static Time::steady_tp        g_linkedLeaderMovedAt;    // when the leader last moved its own camera
+static int g_userFollowMouse = 1; // input:follow_mouse as set before the canvas turned it off
+// Going to a place at 100% shows the minimap for a moment (see canvasPlaceAction).
+static Time::steady_tp g_minimapFlashStart, g_minimapFlashUntil;
+static float minimapFlashAlpha(const Time::steady_tp& now) {
+    if (now >= g_minimapFlashUntil || now < g_minimapFlashStart)
+        return 0.F;
+    const float IN  = std::chrono::duration<float>(now - g_minimapFlashStart).count() / 0.15F;
+    const float OUT = std::chrono::duration<float>(g_minimapFlashUntil - now).count() / 0.4F;
+    return std::clamp(std::min(IN, OUT), 0.F, 1.F);
+}
 // Windows fullscreen on a screen whose canvas stepped aside for them (see
 // "Fullscreen on the canvas").
 struct SCanvasFullscreen {
@@ -120,6 +135,7 @@ struct SCanvasFullscreen {
     std::optional<CBox> before;  // where it was before, as the canvas last drew it
 };
 static std::vector<SCanvasFullscreen> g_canvasFullscreen;
+void unconstrainCanvasWindows();
 static bool canvasFullscreenWindow(const PHLWINDOW& window) {
     return window && std::ranges::any_of(g_canvasFullscreen, [&window](const auto& entry) { return entry.window.lock() == window; });
 }
@@ -460,8 +476,14 @@ static bool shouldShowOverviewWindow(const PHLWINDOW& window) {
 // X11 menus and tooltips (override-redirect windows): the app places them
 // itself, in screen coordinates, so they are drawn and hit fixed to the
 // screen rather than moved with the camera.
+// Pinned floating windows too: they stay put on the screen while the canvas
+// moves under them (SUPER + O).
 static bool canvasScreenFixedWindow(const PHLWINDOW& window) {
-    return validMapped(window) && window->m_isX11 && window->isX11OverrideRedirect() && !window->isHidden();
+    if (!validMapped(window) || window->isHidden())
+        return false;
+    if (window->m_isX11 && window->isX11OverrideRedirect())
+        return true;
+    return window->m_pinned && window->m_isFloating && !(window->m_workspace && window->m_workspace->m_isSpecialWorkspace);
 }
 
 static bool shouldShowPinnedFloatingOverviewWindow(const PHLWINDOW& window) {
@@ -1410,6 +1432,17 @@ CScrollOverview::~CScrollOverview() {
         g_canvasKeyboardNavigationMonitor.reset();
     if (g_canvasActiveCameraMonitor.lock() == MONITOR)
         g_canvasActiveCameraMonitor.reset();
+    // Leading, it may be going away mid-move (a screen stepping aside for a
+    // fullscreen window right after landing): the others go on to where it
+    // was heading, not stop where it had got to.
+    if (g_linkedLeader == this) {
+        g_linkedLeader = nullptr;
+        for (const auto& overview : scrollOverviews()) {
+            auto* canvas = canvasOf(overview);
+            if (canvas && canvas != this && !canvas->isClosing())
+                canvas->inheritLinkedCamera(this);
+        }
+    }
     const auto WORKSPACE = MONITOR ? MONITOR->m_activeWorkspace : PHLWORKSPACE{};
     emitFullscreenVisibilityState(getOverviewFullscreenVisibilityWindow(WORKSPACE, Desktop::focusState()->window()), false);
     restoreWorkspaceAnimationOverrides();
@@ -1431,7 +1464,9 @@ CScrollOverview::~CScrollOverview() {
         canvasReleaseX11Windows();
         restoreActiveWorkspaceVisibility();
         Pointer::Cursor::overrideController->unsetOverride(Pointer::Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
-    }
+        g_canvasCursorShape.clear();
+    } else
+        setCanvasCursor(""); // the canvases still open set theirs again as they need it
     if (const auto MONITOR = pMonitor.lock())
         MONITOR->m_blurFBDirty = true;
     SpatialOverview::BarrelShader::disable();
@@ -1455,7 +1490,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     if (sharedStateOwner)
         forceWorkspaceAlphaVisible();
     applyInputConfigOverrides();
-    g_pInputManager->unconstrainMouse();
+    unconstrainCanvasWindows();
     realtimePreviewTimer = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, realtimePreviewTimerCallback, this);
     scheduleMinimumPreviewFrame();
 
@@ -2154,7 +2189,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         if (closing)
             return;
 
-        g_pInputManager->unconstrainMouse();
+        unconstrainCanvasWindows();
 
         const auto overviewWindow = getOverviewWindowToShow(window);
         const auto fullscreenWindow = overviewWindow && overviewWindow->m_workspace ? getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(overviewWindow->m_workspace)) : PHLWINDOW{};
@@ -2191,7 +2226,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
                     cameraOverview = pointerOverview;
             }
 
-            if (cameraOverview.get() == this)
+            // A window already on screen stays where you see it.
+            if (cameraOverview.get() == this && !canvasWindowOnScreen(overviewWindow))
                 followCanvasWindow(overviewWindow, false);
         }
 
@@ -2362,7 +2398,9 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     if (isCanvasDesktop() || !usesSubmapKeybinds)
         keyboardKeyHook = Event::bus()->m_events.input.keyboard.key.listen(onKeyboardKey);
 
-    Pointer::Cursor::overrideController->setOverride("left_ptr", Pointer::Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
+    // The canvas desktop at 100% leaves the cursor to the apps under it.
+    if (!isCanvasDesktop() || canvasNavigationActive)
+        setCanvasCursor("left_ptr");
 
     redrawAll();
 
@@ -3478,16 +3516,27 @@ CBox CScrollOverview::canvasDesktopWindowBox(const PHLWINDOW& window) const {
                                 false);
 }
 
-std::optional<CBox> CScrollOverview::canvasScreenToWorld(const CBox& screenGlobal) const {
+CBox CScrollOverview::canvasWorldToScreen(const CBox& world) const {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR)
+        return world;
+    const float    ZOOM = std::max(scale->value(), 0.01F);
+    const Vector2D HALF = MONITOR->m_size / 2.0;
+    return CBox{MONITOR->m_position + HALF + (world.pos() - MONITOR->m_position - HALF - viewOffset->value()) * ZOOM, world.size() * ZOOM};
+}
+
+std::optional<CBox> CScrollOverview::canvasScreenToWorld(const CBox& screenGlobal, bool atGoal) const {
     const auto MONITOR = pMonitor.lock();
     if (!MONITOR || !isCanvasDesktop() || closing)
         return std::nullopt;
     // The inverse of getOverviewBox: a monitor-local point p shows the real
-    // point  position + half + camera + (p - half) / zoom.
-    const float    ZOOM = std::max(scale->value(), 0.01F);
-    const Vector2D HALF = MONITOR->m_size / 2.0;
-    const Vector2D P0   = screenGlobal.pos() - MONITOR->m_position;
-    return CBox{MONITOR->m_position + HALF + viewOffset->value() + (P0 - HALF) / ZOOM, screenGlobal.size() / ZOOM};
+    // point  position + half + camera + (p - half) / zoom. atGoal: as it will
+    // be once the camera has arrived.
+    const float    ZOOM   = std::max(atGoal ? scale->goal() : scale->value(), 0.01F);
+    const Vector2D CAMERA = atGoal ? viewOffset->goal() : viewOffset->value();
+    const Vector2D HALF   = MONITOR->m_size / 2.0;
+    const Vector2D P0     = screenGlobal.pos() - MONITOR->m_position;
+    return CBox{MONITOR->m_position + HALF + CAMERA + (P0 - HALF) / ZOOM, screenGlobal.size() / ZOOM};
 }
 
 // The canvas that paces a window's frames: the one on the window's own
@@ -3579,8 +3628,31 @@ static std::optional<Vector2D> canvasX11DrawnPosition(const PHLWINDOW& window) {
     return Vector2D{std::round(POS.x), std::round(POS.y)};
 }
 
+float CScrollOverview::canvasZoom() const {
+    return scale->value();
+}
+
 bool CScrollOverview::canvasAtRestZoom() const {
     return std::abs(scale->value() - 1.F) < 0.001F;
+}
+
+// Whether (nearly) all of a window is on the screens as the canvases draw it
+// now, one screen or across several.
+bool CScrollOverview::canvasWindowOnScreen(const PHLWINDOW& window) {
+    double visible = 0.0, area = 0.0;
+    for (const auto& overview : scrollOverviews()) {
+        const auto* CANVAS  = canvasOf(overview);
+        const auto  MONITOR = CANVAS ? CANVAS->canvasMonitor() : nullptr;
+        if (!MONITOR)
+            continue;
+        const auto BOX = CANVAS->canvasDrawnGlobalBox(window);
+        if (BOX.empty())
+            continue;
+        area = std::max(area, BOX.width * BOX.height);
+        const auto PART = BOX.intersection(MONITOR->logicalBox());
+        visible += PART.width * PART.height;
+    }
+    return area > 0.0 && visible >= area * 0.9;
 }
 
 CBox CScrollOverview::canvasDrawnGlobalBox(const PHLWINDOW& window) const {
@@ -3706,6 +3778,24 @@ static std::vector<SCanvasFullscreen> g_canvasFullscreenPending;
 static wl_event_source*               g_canvasFullscreenIdle     = nullptr;
 static bool                           g_canvasFullscreenApplying = false;
 
+// Every screen leaves the zoomed-out view together. With `leader`, the screen
+// acting (landing on a window, going to a place) keeps the camera: the others
+// follow it rather than their own way out.
+static void leaveNavigationEverywhere(CScrollOverview* leader = nullptr) {
+    for (const auto& overview : scrollOverviews()) {
+        auto* canvas = canvasOf(overview);
+        if (canvas && !canvas->isClosing() && canvas->isCanvasNavigationActive())
+            canvas->toggleCanvasNavigation();
+    }
+    if (!leader)
+        return;
+    for (const auto& overview : scrollOverviews()) {
+        auto* canvas = canvasOf(overview);
+        if (canvas && canvas != leader)
+            canvas->followLinkedLeader(leader);
+    }
+}
+
 static PHLMONITOR monitorAt(const Vector2D& point) {
     PHLMONITOR nearest;
     double     best = INFINITY;
@@ -3762,12 +3852,30 @@ static PHLMONITOR canvasScreenOf(const PHLWINDOW& window) {
     return OWN && canvasOf(scrollOverviewForMonitor(OWN)) ? OWN : nullptr;
 }
 
+// Restart a window's move and resize from `from` (in the coordinates its box
+// is in) to where it is going.
+static void animateWindowFrom(const PHLWINDOW& window, const CBox& from) {
+    const auto POS  = window->m_realPosition->goal();
+    const auto SIZE = window->m_realSize->goal();
+    window->m_realPosition->setValueAndWarp(from.pos());
+    window->m_realSize->setValueAndWarp(from.size());
+    *window->m_realPosition = POS;
+    *window->m_realSize     = SIZE;
+}
+
 static void canvasFullscreenStepAside(const PHLWINDOW& window, const PHLMONITOR& monitor) {
     auto* canvas = canvasOf(scrollOverviewForMonitor(monitor));
     if (!canvas || !canvas->isCanvasDesktop() || canvas->isClosing())
         return;
 
     g_canvasFullscreenApplying = true;
+    // It grows out of where the canvas drew it (zoomed out or not), not out of
+    // its place on the canvas, which Hyprland would take for screen coordinates.
+    std::optional<CBox> before, from;
+    if (const auto IT = g_canvasWindowedBox.find(window.get()); IT != g_canvasWindowedBox.end() && IT->second.window.lock() == window) {
+        before = IT->second.box;
+        from   = canvas->canvasWorldToScreen(*before);
+    }
     // Fullscreen happens on the window's own workspace and monitor; bring it
     // to the screen it was shown on first. (When an X11 app moves itself onto
     // another screen's workspace, Hyprland can leave its monitor behind.)
@@ -3778,12 +3886,11 @@ static void canvasFullscreenStepAside(const PHLWINDOW& window, const PHLMONITOR&
         window->m_monitor = monitor;
         Fullscreen::controller()->setFullscreenMode(window, MODES.internal, MODES.client);
     }
-    std::optional<CBox> before;
-    if (const auto IT = g_canvasWindowedBox.find(window.get()); IT != g_canvasWindowedBox.end() && IT->second.window.lock() == window)
-        before = IT->second.box;
     g_canvasFullscreen.push_back({.window = window, .monitor = monitor, .before = before});
     removeOverview(canvas);
     g_canvasFullscreenApplying = false;
+    if (from)
+        animateWindowFrom(window, *from);
 
     Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
     window->sendWindowSize(true);
@@ -3791,15 +3898,26 @@ static void canvasFullscreenStepAside(const PHLWINDOW& window, const PHLMONITOR&
 
 static void canvasPlaceAfterFullscreen(const SCanvasFullscreen& entry, CScrollOverview* canvas, const PHLWINDOW& WINDOW, const PHLMONITOR& MONITOR);
 
+
 static void canvasFullscreenComeBack(const SCanvasFullscreen& entry) {
     const auto WINDOW  = entry.window.lock();
     const auto MONITOR = entry.monitor.lock();
     const bool FOCUSED = WINDOW && Desktop::focusState()->window() == WINDOW;
     if (!MONITOR || scrollOverviewForMonitor(MONITOR) || !openCanvasOverview(MONITOR))
         return;
-    auto*      canvas = canvasOf(scrollOverviewForMonitor(MONITOR));
+    auto* canvas = canvasOf(scrollOverviewForMonitor(MONITOR));
+    if (!canvas)
+        return;
+    // Back on the canvas as the other screens are: their camera, and zoomed
+    // out if they are.
+    canvas->followLinkedCamera();
+    if (!canvas->isCanvasNavigationActive() && std::ranges::any_of(scrollOverviews(), [canvas](const auto& overview) {
+            const auto* OTHER = canvasOf(overview);
+            return OTHER && OTHER != canvas && !OTHER->isClosing() && OTHER->isCanvasNavigationActive();
+        }))
+        canvas->toggleCanvasNavigation();
     const auto TARGET = validMapped(WINDOW) ? WINDOW->layoutTarget() : nullptr;
-    if (!canvas || !TARGET || WINDOW->m_workspace != MONITOR->m_activeWorkspace || Fullscreen::controller()->isFullscreen(WINDOW))
+    if (!TARGET || WINDOW->m_workspace != MONITOR->m_activeWorkspace || Fullscreen::controller()->isFullscreen(WINDOW))
         return;
     // The keyboard stays with the window that left fullscreen, not with
     // whatever the reopened canvas had selected.
@@ -3810,7 +3928,11 @@ static void canvasFullscreenComeBack(const SCanvasFullscreen& entry) {
             Desktop::focusState()->fullWindowFocus(WINDOW, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
         canvas->canvasAdoptFocus(WINDOW);
     });
+    const auto FULLSCREEN = canvas->canvasScreenToWorld(MONITOR->logicalBox());
     canvasPlaceAfterFullscreen(entry, canvas, WINDOW, MONITOR);
+    // It shrinks back from the full screen into its place.
+    if (FULLSCREEN)
+        animateWindowFrom(WINDOW, *FULLSCREEN);
 }
 
 // Where a window that left fullscreen goes on its screen's canvas.
@@ -3825,7 +3947,6 @@ static void canvasPlaceAfterFullscreen(const SCanvasFullscreen& entry, CScrollOv
         if (const auto WORLD = canvas->canvasScreenToWorld(SCREEN)) {
             TARGET->rememberFloatingSize(SCREEN.size());
             TARGET->setPositionGlobal(CBox{WORLD->pos(), SCREEN.size()});
-            TARGET->warpPositionSize();
             WINDOW->sendWindowSize(true);
         }
         return;
@@ -3834,7 +3955,6 @@ static void canvasPlaceAfterFullscreen(const SCanvasFullscreen& entry, CScrollOv
     if (entry.before) {
         TARGET->rememberFloatingSize(entry.before->size());
         TARGET->setPositionGlobal(*entry.before);
-        TARGET->warpPositionSize();
         WINDOW->sendWindowSize(true);
         return;
     }
@@ -3859,6 +3979,11 @@ static void canvasFullscreenCheck(void*) {
 
     auto pending = std::move(g_canvasFullscreenPending);
     g_canvasFullscreenPending.clear();
+    // Going fullscreen from the zoomed-out view: every screen returns to 100%
+    // (the window grows out of where it was drawn), so no screen is left
+    // zoomed out beside it.
+    if (!pending.empty())
+        leaveNavigationEverywhere();
     for (const auto& request : pending) {
         const auto WINDOW  = request.window.lock();
         const auto MONITOR = request.monitor.lock();
@@ -3877,6 +4002,76 @@ static void canvasFullscreenCheck(void*) {
     });
     for (const auto& entry : done)
         canvasFullscreenComeBack(entry);
+}
+
+// Hyprland keeps a pointer confinement in the window's real coordinates, which
+// on the canvas are not where it is drawn: the pointer would be trapped
+// somewhere invisible. Release those; a window the canvas does not draw (a
+// fullscreen game on a screen of its own) keeps its own, so its mouse-look
+// stays on it.
+void unconstrainCanvasWindows() {
+    const auto CONSTRAINTS = g_pInputManager->m_constraints; // deactivating a one-shot one removes it
+    for (const auto& ref : CONSTRAINTS) {
+        const auto CONSTRAINT = ref.lock();
+        if (!CONSTRAINT || !CONSTRAINT->isActive())
+            continue;
+        const auto OWNER  = CONSTRAINT->owner();
+        const auto WINDOW = OWNER && OWNER->view() ? Desktop::View::CWindow::fromView(OWNER->view()) : nullptr;
+        if (WINDOW && !shouldShowOverviewWindow(WINDOW))
+            continue;
+        CONSTRAINT->deactivate();
+    }
+}
+
+bool canvasCursorHidden(); // Cursor.cpp
+
+// A fullscreen game with its cursor hidden (mouse-look) keeps the pointer on
+// its screen: a pointer you cannot see must not wander onto the next screen
+// and give focus to a window there. Games often do not confine it. Wine hides
+// the cursor with an empty 1x1 image rather than none. From main.cpp's
+// mouse-move listener; true: the move is undone.
+bool canvasKeepPointerOnFullscreen();
+
+// The canvas turns Hyprland's focus-follows-mouse off (it focuses on its own
+// terms). A screen whose canvas stepped aside for a fullscreen window gets it
+// back, as your follow_mouse setting says: the pointer moving onto it focuses
+// that window.
+static void canvasFollowMouseOntoFullscreen() {
+    if (g_canvasFullscreen.empty() || g_userFollowMouse != 1 || scrollOverviews().empty())
+        return;
+    const auto POS = g_pInputManager->getMouseCoordsInternal();
+    for (const auto& entry : g_canvasFullscreen) {
+        const auto WINDOW  = entry.window.lock();
+        const auto MONITOR = entry.monitor.lock();
+        if (validMapped(WINDOW) && MONITOR && MONITOR->logicalBox().containsPoint(POS) && Desktop::focusState()->window() != WINDOW) {
+            Desktop::focusState()->fullWindowFocus(WINDOW, Desktop::FOCUS_REASON_FFM);
+            return;
+        }
+    }
+}
+
+// Pointer moves, from main.cpp's listener; true: the move is undone.
+bool canvasPointerMoved() {
+    if (canvasKeepPointerOnFullscreen())
+        return true;
+    canvasFollowMouseOntoFullscreen();
+    return false;
+}
+
+bool canvasKeepPointerOnFullscreen() {
+    const auto WINDOW = getOverviewWindowToShow(Desktop::focusState()->window());
+    const auto ENTRY  = std::ranges::find_if(g_canvasFullscreen, [&WINDOW](const auto& entry) { return WINDOW && entry.window.lock() == WINDOW; });
+    const auto MONITOR = ENTRY != g_canvasFullscreen.end() ? ENTRY->monitor.lock() : nullptr;
+    if (!MONITOR)
+        return false;
+    if (!canvasCursorHidden())
+        return false;
+    const auto BOX = MONITOR->logicalBox();
+    const auto POS = g_pInputManager->getMouseCoordsInternal();
+    if (BOX.containsPoint(POS))
+        return false;
+    Pointer::pointerController()->warpTo(Vector2D{std::clamp(POS.x, BOX.x, BOX.x + BOX.width - 1.0), std::clamp(POS.y, BOX.y, BOX.y + BOX.height - 1.0)}, true);
+    return true;
 }
 
 // Opening the canvas on a screen a fullscreen window has to itself (Super+
@@ -3964,6 +4159,44 @@ void canvasFullscreenReset() {
     g_canvasWindowedBox.clear();
 }
 
+// ---- State for scripts and tests (hyprctl spatialoverview) --------------------------
+static std::string jsonString(const std::string& text) {
+    std::string out = "\"";
+    for (const char c : text) {
+        if (c == '"' || c == '\\')
+            out += '\\';
+        if (sc<unsigned char>(c) < 0x20)
+            out += ' ';
+        else
+            out += c;
+    }
+    return out + "\"";
+}
+
+static std::string canvasFillJson(); // below
+
+std::string canvasStateJson() {
+    std::string screens, fullscreen;
+    for (const auto& overview : scrollOverviews()) {
+        const auto* CANVAS  = canvasOf(overview);
+        const auto  MONITOR = CANVAS ? CANVAS->canvasMonitor() : nullptr;
+        if (!MONITOR)
+            continue;
+        const auto CAMERA = CANVAS->canvasScreenToWorld(MONITOR->logicalBox());
+        screens += std::format("{}{{\"monitor\": {}, \"zoom\": {:.3f}, \"navigating\": {}, \"closing\": {}, \"view\": [{:.0f}, {:.0f}, {:.0f}, {:.0f}]}}", screens.empty() ? "" : ", ",
+                               jsonString(MONITOR->m_name), CANVAS->canvasZoom(), CANVAS->isCanvasNavigationActive() ? "true" : "false", CANVAS->isClosing() ? "true" : "false",
+                               CAMERA ? CAMERA->x : 0.0, CAMERA ? CAMERA->y : 0.0, CAMERA ? CAMERA->width : 0.0, CAMERA ? CAMERA->height : 0.0);
+    }
+    for (const auto& entry : g_canvasFullscreen) {
+        const auto WINDOW  = entry.window.lock();
+        const auto MONITOR = entry.monitor.lock();
+        fullscreen += std::format("{}{{\"window\": {}, \"monitor\": {}}}", fullscreen.empty() ? "" : ", ", jsonString(WINDOW ? WINDOW->m_title : ""), jsonString(MONITOR ? MONITOR->m_name : ""));
+    }
+    const auto* LEADER = g_linkedLeader;
+    return std::format("{{\"linked\": {}, \"leader\": {}, \"screens\": [{}], \"fullscreen\": [{}], \"filled\": [{}]}}\n", ScrollOverview::Config::getCanvasLinkedScreens() ? "true" : "false",
+                       jsonString(LEADER && LEADER->canvasMonitor() ? LEADER->canvasMonitor()->m_name : ""), screens, fullscreen, canvasFillJson());
+}
+
 // ---- Fill the screen (Super+T on the canvas) ---------------------------------------
 // Everything floats on the canvas, so the float/tile toggle has nothing to
 // do there. Instead the window fills the screen it is shown on, 1:1 and
@@ -3977,6 +4210,79 @@ static std::unordered_map<const Desktop::View::CWindow*, SCanvasFill> g_canvasFi
 
 // False only when no canvas desktop is running (the key then does what it
 // does without the canvas); a window it can't fill is left as it is.
+static std::string canvasFillJson() {
+    std::string out;
+    for (const auto& [_, entry] : g_canvasFill) {
+        if (const auto WINDOW = entry.window.lock())
+            out += (out.empty() ? "" : ", ") + jsonString(WINDOW->m_title);
+    }
+    return out;
+}
+
+// SUPER + O on the canvas: the window stays where it is on the screen while
+// the canvas moves under it (pinned); again puts it back on the canvas right
+// where it then is. From the zoomed-out view it lands at 100% first.
+bool canvasTogglePin(PHLWINDOW window) {
+    if (std::ranges::none_of(scrollOverviews(), [](const auto& overview) {
+            const auto* CANVAS = canvasOf(overview);
+            return CANVAS && CANVAS->isCanvasDesktop() && !CANVAS->isClosing();
+        }))
+        return false;
+
+    window            = getOverviewWindowToShow(window);
+    const auto TARGET = validMapped(window) ? window->layoutTarget() : nullptr;
+    if (!TARGET || !window->m_isFloating || Fullscreen::controller()->isFullscreen(window) || (window->m_workspace && window->m_workspace->m_isSpecialWorkspace))
+        return true;
+
+    if (window->m_pinned) {
+        const auto BOX     = CBox{window->m_realPosition->goal(), window->m_realSize->goal()};
+        auto*      canvas  = canvasOf(scrollOverviewForMonitor(monitorAt(BOX.middle())));
+        (void)Config::Actions::pinWindow(Config::Actions::TOGGLE_ACTION_DISABLE, window);
+        if (const auto WORLD = canvas ? canvas->canvasScreenToWorld(CBox{BOX.pos(), BOX.size() * canvas->canvasZoom()}) : std::nullopt) {
+            TARGET->setPositionGlobal(CBox{WORLD->pos(), BOX.size()});
+            TARGET->warpPositionSize();
+            window->sendWindowSize(true);
+        }
+        return true;
+    }
+
+    const auto MONITOR = canvasScreenOf(window);
+    auto*      canvas  = MONITOR ? canvasOf(scrollOverviewForMonitor(MONITOR)) : nullptr;
+    if (!canvas || !shouldShowOverviewWindow(window))
+        return true;
+    if (canvas->isCanvasNavigationActive()) {
+        canvas->canvasAdoptFocus(window);
+        canvas->flightDeckAction("land");
+        leaveNavigationEverywhere(canvas);
+    }
+    // Where it is drawn once the camera has arrived, at its own size.
+    const auto REAL   = CBox{window->m_realPosition->goal(), window->m_realSize->goal()};
+    const auto ORIGIN = canvas->canvasScreenToWorld(MONITOR->logicalBox(), true);
+    if (!ORIGIN)
+        return true;
+    const Vector2D SCREENPOS = MONITOR->m_position + (REAL.pos() - ORIGIN->pos()) * (MONITOR->m_size.x / std::max(1.0, ORIGIN->width));
+    TARGET->setPositionGlobal(CBox{SCREENPOS, REAL.size()});
+    TARGET->warpPositionSize();
+    (void)Config::Actions::pinWindow(Config::Actions::TOGGLE_ACTION_ENABLE, window);
+    window->sendWindowSize(true);
+    return true;
+}
+
+// The area Super+T fills: the screen minus what bars and docks reserve, with
+// the gap tiled windows keep (general:gaps_out) all around it, and the
+// window's border inside that gap, as for a tiled window.
+static CBox canvasFillArea(const PHLMONITOR& monitor, const PHLWINDOW& window) {
+    auto box = monitor->logicalBoxMinusReserved();
+    if (const auto* GAPS = sc<Config::CCssGapData*>(ScrollOverview::Config::valueRef<Config::IComplexConfigValue>("general:gaps_out").ptr())) {
+        box.x += GAPS->m_left;
+        box.y += GAPS->m_top;
+        box.width -= GAPS->m_left + GAPS->m_right;
+        box.height -= GAPS->m_top + GAPS->m_bottom;
+    }
+    const double BORDER = window ? window->getRealBorderSize() : 0;
+    return CBox{box.x + BORDER, box.y + BORDER, box.width - 2 * BORDER, box.height - 2 * BORDER};
+}
+
 bool canvasToggleFill(PHLWINDOW window) {
     if (std::ranges::none_of(scrollOverviews(), [](const auto& overview) {
             const auto* CANVAS = canvasOf(overview);
@@ -3989,32 +4295,53 @@ bool canvasToggleFill(PHLWINDOW window) {
     if (!shouldShowOverviewWindow(window) || !TARGET || !TARGET->floating() || window->m_pinned || Fullscreen::controller()->isFullscreen(window))
         return true;
 
+    const auto MONITOR = canvasScreenOf(window);
+    auto*      canvas  = MONITOR ? canvasOf(scrollOverviewForMonitor(MONITOR)) : nullptr;
+    if (!canvas)
+        return true;
+
+    // Super+T always ends at 100%, where the result is what you see: from the
+    // zoomed-out view it lands on the window first.
+    if (canvas->isCanvasNavigationActive()) {
+        canvas->canvasAdoptFocus(window);
+        canvas->flightDeckAction("land");
+        leaveNavigationEverywhere(canvas);
+    }
+    // A filled window is the one you are looking at: on top of the others.
+    (void)Config::Actions::alterZOrder("top", window);
+
+    const auto apply = [&](const CBox& box) {
+        TARGET->rememberFloatingSize(box.size());
+        TARGET->setPositionGlobal(box);
+        window->sendWindowSize(true);
+    };
+
     const auto NOW = CBox{window->m_realPosition->goal(), window->m_realSize->goal()};
     if (const auto IT = g_canvasFill.find(window.get()); IT != g_canvasFill.end()) {
         const auto ENTRY = IT->second;
         g_canvasFill.erase(IT);
-        // Moved or resized since: fill again rather than jump back.
-        if (ENTRY.window.lock() == window && NOW.pos().distanceSq(ENTRY.filled.pos()) < 1.0 && NOW.size().distanceSq(ENTRY.filled.size()) < 1.0) {
-            TARGET->rememberFloatingSize(ENTRY.before.size());
-            TARGET->setPositionGlobal(ENTRY.before);
-            TARGET->warpPositionSize();
-            window->sendWindowSize(true);
-            return true;
+        if (ENTRY.window.lock() == window) {
+            // Untouched since: back exactly where and how big it was.
+            if (NOW.pos().distanceSq(ENTRY.filled.pos()) < 1.0 && NOW.size().distanceSq(ENTRY.filled.size()) < 1.0) {
+                apply(ENTRY.before);
+                return true;
+            }
+            // Moved since: its old size, around where it is now.
+            if (NOW.size().distanceSq(ENTRY.filled.size()) < 1.0) {
+                apply(CBox{NOW.middle() - ENTRY.before.size() / 2.0, ENTRY.before.size()});
+                return true;
+            }
+            // Resized since: it is not filling anything any more; fill again.
         }
     }
 
-    const auto MONITOR = canvasScreenOf(window);
-    auto*      canvas  = MONITOR ? canvasOf(scrollOverviewForMonitor(MONITOR)) : nullptr;
-    const auto USABLE  = MONITOR ? MONITOR->logicalBoxMinusReserved() : CBox{};
-    const auto WORLD   = canvas ? canvas->canvasScreenToWorld(USABLE) : std::nullopt;
+    const auto AREA  = canvasFillArea(MONITOR, window);
+    const auto WORLD = canvas->canvasScreenToWorld(AREA, true);
     if (!WORLD)
         return true;
-    const CBox FILLED{WORLD->pos(), USABLE.size()};
+    const CBox FILLED{WORLD->pos(), AREA.size()};
     g_canvasFill[window.get()] = {.window = window, .before = NOW, .filled = FILLED};
-    TARGET->rememberFloatingSize(FILLED.size());
-    TARGET->setPositionGlobal(FILLED);
-    TARGET->warpPositionSize();
-    window->sendWindowSize(true);
+    apply(FILLED);
     return true;
 }
 
@@ -4186,6 +4513,9 @@ bool CScrollOverview::followCanvasWindow(PHLWINDOW window, bool syncFocus, bool 
         return false;
 
     markCanvasCameraActive(MONITOR);
+    // The window you go to is the one you see: in front of the others.
+    if (syncFocus)
+        (void)Config::Actions::alterZOrder("top", window);
 
     size_t workspaceIdx = viewportCurrentWorkspace;
     for (size_t i = 0; i < images.size(); ++i) {
@@ -6044,6 +6374,17 @@ void CScrollOverview::finishWorkspaceScrollFollow() {
 }
 
 void CScrollOverview::syncSelectionToViewport() {
+    // On the canvas desktop at 100% the selection follows focus; rebuilding
+    // (a window changed workspace, a monitor changed) never moves focus.
+    if (isCanvasDesktop() && !canvasNavigationActive) {
+        const auto FOCUSED = getOverviewWindowToShow(Desktop::focusState()->window());
+        if (shouldShowOverviewWindow(FOCUSED)) {
+            closeOnWindow = FOCUSED;
+            rememberSelection(FOCUSED);
+        }
+        return;
+    }
+
     if (images.empty() || viewportCurrentWorkspace >= images.size()) {
         closeOnWindow.reset();
         return;
@@ -6654,6 +6995,7 @@ void CScrollOverview::applyInputConfigOverrides() {
     previousWarpOnToggleSpecial        = ScrollOverview::Config::getValue<int>("cursor:warp_on_toggle_special");
     previousWarpBackAfterNonMouseInput = ScrollOverview::Config::getValue<int>("cursor:warp_back_after_non_mouse_input");
     previousFollowMouse                = ScrollOverview::Config::getValue<int>("input:follow_mouse");
+    g_userFollowMouse                  = previousFollowMouse;
     inputConfigOverridden = true;
 
     ScrollOverview::Config::setValue("cursor:no_warps", 1);
@@ -7061,9 +7403,17 @@ CBox CScrollOverview::canvasArrangeButtonBox() const {
 }
 
 void CScrollOverview::renderCanvasMinimap(PHLMONITOR monitor) {
-    const float TRANSITION = overviewProgress();
-    if (!isCanvasDesktop() || !ScrollOverview::Config::getCanvasMinimapEnabled() || !monitor || TRANSITION <= 0.001F)
+    const float PROGRESS   = overviewProgress();
+    const float TRANSITION = std::max(PROGRESS, minimapFlashAlpha(Time::steadyNow()));
+    if (!isCanvasDesktop() || !ScrollOverview::Config::getCanvasMinimapEnabled() || !monitor || TRANSITION <= 0.001F) {
+        // The lens shader keeps the last minimap it was given: hide it once.
+        if (minimapShown) {
+            minimapShown = false;
+            SpatialOverview::BarrelShader::updateMinimap(SpatialOverview::BarrelShader::SMinimapData{});
+        }
         return;
+    }
+    minimapShown = true;
 
     const float ZOOM = std::max(scale->value(), 0.01F);
     const auto  CENTERLOGICAL = monitor->m_size / 2.F;
@@ -7149,7 +7499,8 @@ void CScrollOverview::renderCanvasMinimap(PHLMONITOR monitor) {
         return std::array<float, 4>{sc<float>(box.x), sc<float>(box.y), sc<float>(box.width), sc<float>(box.height)};
     };
     shaderMinimap.panel         = toArray(PANEL.copy().round());
-    shaderMinimap.arrangeButton = toArray(canvasArrangeButtonBox());
+    // The tidy button belongs to the zoomed-out view, not to a passing glance.
+    shaderMinimap.arrangeButton = PROGRESS > 0.001F ? toArray(canvasArrangeButtonBox()) : std::array<float, 4>{0.F, 0.F, 0.F, 0.F};
     shaderMinimap.viewport      = toArray(mapWorldBox(VIEWPORTWORLD));
     shaderMinimap.activeColor   = {activeColor.r, activeColor.g, activeColor.b};
     shaderMinimap.inactiveColor = {inactiveColor.r, inactiveColor.g, inactiveColor.b};
@@ -7994,6 +8345,10 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
         window == getOverviewWindowToShow(g_pointerGrabOverview->dragActiveWindow.lock()))
         return true;
 
+    // Fixed to the screen (pinned, X11 menus): drawn every frame where they are.
+    if (isCanvasDesktop() && canvasScreenFixedWindow(window))
+        return true;
+
     // The canvas desktop: whatever a canvas draws gets its frames at that
     // monitor's refresh (see sendOverviewFrameCallbacks). Windows no canvas
     // shows only get the throttled ones.
@@ -8102,6 +8457,10 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
             damage();
         return true;
     }
+
+    // Fixed to the screen: damage where it is, as Hyprland reports it.
+    if (isCanvasDesktop() && canvasScreenFixedWindow(window))
+        return true;
 
     // The canvas desktop draws windows away from their real position, so the
     // damage Hyprland would report lands where nothing shows the window.
@@ -8391,9 +8750,114 @@ void CScrollOverview::reopen() {
     damage();
 }
 
+// ---- Linked screens --------------------------------------------------------------
+// The screens are one wide desk on the canvas: each shows the part next to
+// the other's, as the monitors are arranged, and they move together. A window
+// is never shown twice, and one dragged across the seam lands where it was
+// dropped. Whichever canvas's own code moved its camera last leads; the others
+// take the leader's camera every frame (so every camera feature works on any
+// screen without knowing about the others). A point g (global logical) shows
+// the canvas point  center + camera + (g - center) / zoom  on every screen,
+// so another screen's camera is the leader's plus the distance between their
+// centers times (1/zoom - 1): at 100% they are the same.
+void CScrollOverview::inheritLinkedCamera(const CScrollOverview* from) {
+    const auto MONITOR = pMonitor.lock();
+    const auto FROM    = from ? from->canvasMonitor() : nullptr;
+    if (!MONITOR || !FROM || !isCanvasDesktop() || !ScrollOverview::Config::getCanvasLinkedScreens())
+        return;
+    const float ZOOM     = std::max(from->scale->goal(), 0.01F);
+    const auto  DISTANCE = (MONITOR->m_position + MONITOR->m_size / 2.0) - (FROM->m_position + FROM->m_size / 2.0);
+    *scale               = ZOOM;
+    *viewOffset          = from->viewOffset->goal() + DISTANCE * (1.0 / ZOOM - 1.0);
+}
+
+void CScrollOverview::followLinkedLeader(const CScrollOverview* leader) {
+    g_linkedLeader      = leader;
+    linkedAppliedOffset = viewOffset->goal();
+    linkedAppliedScale  = scale->goal();
+}
+
+void CScrollOverview::followLinkedCamera() {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR || !isCanvasDesktop() || !ScrollOverview::Config::getCanvasLinkedScreens())
+        return;
+
+    const bool NEW         = linkedAppliedScale < 0.F;
+    const bool MOVEDITSELF = !NEW && (scale->goal() != linkedAppliedScale || viewOffset->goal() != linkedAppliedOffset);
+    const CScrollOverview* leader = nullptr;
+    for (const auto& overview : scrollOverviews()) {
+        const auto* CANVAS = canvasOf(overview);
+        if (CANVAS && CANVAS == g_linkedLeader && !CANVAS->isClosing() && CANVAS->isCanvasDesktop())
+            leader = CANVAS;
+    }
+    // One that moved its own camera leads; a new one takes the leader's. When
+    // both screens move at once (leaving the zoomed-out view, each its own
+    // way), the one you are working on keeps the lead.
+    const auto NOW = Time::steadyNow();
+    if (MOVEDITSELF) {
+        const auto* ACTIVE     = canvasOf(activeScrollOverview());
+        const bool  LEADERBUSY = leader && leader != this && leader == ACTIVE && NOW - g_linkedLeaderMovedAt < std::chrono::milliseconds(200);
+        if (!LEADERBUSY) {
+            leader                = this;
+            g_linkedLeaderMovedAt = NOW;
+        }
+    } else if (!leader)
+        leader = this;
+    g_linkedLeader = leader;
+
+    if (leader == this) {
+        linkedAppliedOffset = viewOffset->goal();
+        linkedAppliedScale  = scale->goal();
+        return;
+    }
+
+    const auto  LEADERMONITOR = leader->canvasMonitor();
+    const float ZOOM          = std::max(leader->scale->value(), 0.01F);
+    const auto  DISTANCE      = (MONITOR->m_position + MONITOR->m_size / 2.0) - (LEADERMONITOR->m_position + LEADERMONITOR->m_size / 2.0);
+    const auto  OFFSET        = leader->viewOffset->value() + DISTANCE * (1.0 / ZOOM - 1.0);
+    if (scale->value() != ZOOM || scale->goal() != ZOOM)
+        scale->setValueAndWarp(ZOOM);
+    if (viewOffset->value() != OFFSET || viewOffset->goal() != OFFSET)
+        viewOffset->setValueAndWarp(OFFSET);
+    linkedAppliedOffset = OFFSET;
+    linkedAppliedScale  = ZOOM;
+}
+
+// A canvas window belongs to the workspace of the screen that shows most of
+// it. Hyprland keys much to that: one fullscreen window per workspace (a
+// window on the other screen's workspace would throw it out of fullscreen),
+// which monitor focus is on, where an X11 app is. Checked while the camera is
+// at rest at 100%; moving a window to a workspace must not move it on the
+// canvas, so it goes back exactly where it was.
+void CScrollOverview::syncCanvasWindowScreens() {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR || !isCanvasDesktop() || closing || canvasNavigationActive || !canvasAtRestZoom() || viewOffset->isBeingAnimated() || scale->isBeingAnimated() ||
+        dragActiveWindow || g_pointerGrabOverview || !MONITOR->m_activeWorkspace || MONITOR->m_activeWorkspace->m_isSpecialWorkspace)
+        return;
+    const auto SCREEN = MONITOR->logicalBox();
+    for (const auto& windowRef : Desktop::windowState()->windows()) {
+        const auto WINDOW = getOverviewWindowToShow(windowRef);
+        if (!shouldShowOverviewWindow(WINDOW) || WINDOW->m_pinned || WINDOW->m_workspace == MONITOR->m_activeWorkspace || Fullscreen::controller()->isFullscreen(WINDOW) ||
+            !WINDOW->layoutTarget() || WINDOW->m_realPosition->isBeingAnimated())
+            continue;
+        const auto BOX  = canvasDrawnGlobalBox(WINDOW);
+        const auto MINE = BOX.intersection(SCREEN);
+        if (MINE.width * MINE.height < BOX.width * BOX.height * 0.5) // mostly here
+            continue;
+        const auto KEEP = CBox{WINDOW->m_realPosition->goal(), WINDOW->m_realSize->goal()};
+        moveCanvasWindowToWorkspace(WINDOW, MONITOR->m_activeWorkspace);
+        WINDOW->m_monitor = MONITOR;
+        WINDOW->layoutTarget()->setPositionGlobal(KEEP);
+        WINDOW->layoutTarget()->warpPositionSize();
+    }
+}
+
 void CScrollOverview::onPreRender() {
     if (pMonitor)
         pMonitor->m_solitaryClient.reset();
+
+    followLinkedCamera();
+    syncCanvasWindowScreens();
 
     forceLayersAboveFullscreen();
     updateWorkspaceOverflow();
@@ -8588,6 +9052,11 @@ void CScrollOverview::render() {
         sendOverviewFrameCallbacks(NOW);
         if (canvasPopupFading())
             schedulePopupFadeFrame();
+        if (minimapFlashAlpha(Time::steadyNow()) > 0.F || minimapShown) {
+            if (viewOffset->isBeingAnimated())
+                g_minimapFlashUntil = std::max(g_minimapFlashUntil, Time::steadyNow() + std::chrono::milliseconds(1000));
+            damage();
+        }
         canvasResyncX11Windows();
         return;
     }
@@ -10019,7 +10488,7 @@ void CScrollOverview::updateNavigatorHover() {
             navigatorHoverWindow.reset();
             damage();
         }
-        setCanvasCursor("left_ptr");
+        setCanvasCursor(isCanvasDesktop() ? "" : "left_ptr");
         return;
     }
 
@@ -10047,14 +10516,21 @@ void CScrollOverview::leaveNavigatorPointer() {
     hoverFocusSettleSeen = false;
     hoverFocusSettleWindow.reset();
     navigatorHoverWindow.reset();
-    setCanvasCursor("left_ptr");
+    setCanvasCursor(isCanvasDesktop() ? "" : "left_ptr");
 }
 
+// Empty: no override, the app under the pointer picks the cursor (a game's
+// own, a text beam). The override is global, as is what the canvases last
+// set (g_canvasCursorShape), so the canvas only sets one while it is using
+// the pointer itself.
 void CScrollOverview::setCanvasCursor(const std::string& shape) {
-    if (shape == canvasCursorShape)
+    if (shape == g_canvasCursorShape)
         return;
-    canvasCursorShape = shape;
-    Pointer::Cursor::overrideController->setOverride(shape, Pointer::Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
+    g_canvasCursorShape = shape;
+    if (shape.empty())
+        Pointer::Cursor::overrideController->unsetOverride(Pointer::Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
+    else
+        Pointer::Cursor::overrideController->setOverride(shape, Pointer::Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
 }
 
 void CScrollOverview::renderNavigatorWindowOverlay(PHLMONITOR monitor, PHLWINDOW window, const CBox& windowBox) {
@@ -10317,19 +10793,144 @@ bool CScrollOverview::flightDeckAction(const std::string& action) {
         }
         return nudgeWindow(Desktop::focusState()->window(), VECTOR, true);
     }
-    if (action.starts_with("area ") || action.starts_with("send ")) {
+    if (action.starts_with("area ")) {
         int id=0; try { id=std::stoi(action.substr(5)); } catch (...) { return false; }
         const auto ws = State::workspaceState()->query().id(id).run();
         if (!ws || ws->m_isSpecialWorkspace) return false;
-        if (action.starts_with("send ")) {
-            const auto w = Desktop::focusState()->window(); if (!shouldShowOverviewWindow(w)) return false;
-            checkpointCanvas(); moveCanvasWindowToWorkspace(w, ws);
-            if (g_canvasNativeLayout.contains(w->m_stableID)) g_canvasNativeLayout.at(w->m_stableID).workspace=ws;
-            return true;
-        }
         for (const auto& w : Desktop::windowState()->windows())
             if (shouldShowOverviewWindow(w) && w->m_workspace==ws) return followCanvasWindow(w,true,true);
         return false;
     }
+    if (action.starts_with("go ") || action.starts_with("send "))
+        return canvasPlaceAction(action);
     return false;
+}
+
+// ---- Places: the workspace keys on the canvas ---------------------------------------
+// SUPER + 1…0 go to a place on the canvas, SHIFT + SUPER + N sends the focused
+// window there and follows it (SHIFT + ALT + SUPER + N: without following),
+// SUPER + TAB / SHIFT + SUPER + TAB step through the places that have windows,
+// CTRL + SUPER + TAB goes back to the place before. A place is a view of the
+// canvas (the camera of all screens, at 100%). At first the places are a row,
+// a screen-set apart, with the one numbered after the workspace you were on
+// where you are; each then remembers where you left its camera and which
+// window had focus there.
+struct SCanvasPlace {
+    Vector2D     camera;
+    PHLWINDOWREF focus;
+};
+static std::unordered_map<int, SCanvasPlace> g_places;
+static int                                   g_place = 0, g_previousPlace = 0, g_placeAnchor = 0;
+static Vector2D                              g_placeAnchorCamera;
+
+// The screens side by side, and the distance between two places' views.
+static CBox canvasScreensBox() {
+    CBox box;
+    for (const auto& monitor : State::monitorState()->monitors()) {
+        if (!monitor || !monitor->m_enabled)
+            continue;
+        const auto BOX = monitor->logicalBox();
+        if (box.empty())
+            box = BOX;
+        else {
+            const double X0 = std::min(box.x, BOX.x), Y0 = std::min(box.y, BOX.y);
+            box             = CBox{X0, Y0, std::max(box.x + box.width, BOX.x + BOX.width) - X0, std::max(box.y + box.height, BOX.y + BOX.height) - Y0};
+        }
+    }
+    return box;
+}
+
+static Vector2D placeCamera(int place) {
+    if (const auto IT = g_places.find(place); IT != g_places.end())
+        return IT->second.camera;
+    return g_placeAnchorCamera + Vector2D{(place - g_placeAnchor) * canvasScreensBox().width * 1.5, 0.0};
+}
+
+// Whether any window is in a place's view (its middle on the screens there).
+static bool placeHasWindows(int place) {
+    const auto VIEW = canvasScreensBox().translate(placeCamera(place));
+    return std::ranges::any_of(Desktop::windowState()->windows(), [&VIEW](const auto& window) {
+        return shouldShowOverviewWindow(window) && !window->m_pinned && VIEW.containsPoint(window->m_realPosition->goal() + window->m_realSize->goal() / 2.0);
+    });
+}
+
+bool CScrollOverview::canvasPlaceAction(const std::string& action) {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR || !isCanvasDesktop() || closing)
+        return false;
+    // You are at the place of the workspace you were on.
+    if (g_place == 0) {
+        const auto ID      = MONITOR->m_activeWorkspace ? MONITOR->m_activeWorkspace->m_id : 1;
+        g_place            = ID >= 1 && ID <= 10 ? sc<int>(ID) : 1;
+        g_placeAnchor      = g_place;
+        g_placeAnchorCamera = viewOffset->goal();
+    }
+
+    // Zoomed out, the view glides there and stays zoomed out, on the minimap;
+    // at 100% the minimap shows for a moment while you travel.
+    const auto go = [this](int place) {
+        if (place < 1 || place > 10)
+            return false;
+        const auto FOCUSED            = getOverviewWindowToShow(Desktop::focusState()->window());
+        g_places[g_place]             = {.camera = viewOffset->goal(), .focus = FOCUSED};
+        if (place != g_place)
+            g_previousPlace = g_place;
+        g_place = place;
+        markCanvasCameraActive(pMonitor.lock());
+        if (!canvasNavigationActive) {
+            const auto NOW = Time::steadyNow();
+            if (NOW >= g_minimapFlashUntil)
+                g_minimapFlashStart = NOW;
+            g_minimapFlashUntil = NOW + std::chrono::milliseconds(1400);
+        }
+        *viewOffset = placeCamera(place);
+        // Focus what had it there, or nothing that is not there.
+        const auto REMEMBERED = g_places.contains(place) ? g_places.at(place).focus.lock() : PHLWINDOW{};
+        const auto VIEW       = canvasScreensBox().translate(placeCamera(place));
+        if (shouldShowOverviewWindow(REMEMBERED) && VIEW.containsPoint(REMEMBERED->m_realPosition->goal() + REMEMBERED->m_realSize->goal() / 2.0))
+            canvasAdoptFocus(REMEMBERED);
+        else if (FOCUSED && !VIEW.containsPoint(FOCUSED->m_realPosition->goal() + FOCUSED->m_realSize->goal() / 2.0))
+            Desktop::focusState()->fullWindowFocus(nullptr, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+        damage();
+        return true;
+    };
+
+    if (action.starts_with("go ")) {
+        const auto WHERE = action.substr(3);
+        if (WHERE == "back")
+            return go(g_previousPlace ? g_previousPlace : g_place);
+        if (WHERE == "next" || WHERE == "prev") {
+            const int STEP = WHERE == "next" ? 1 : -1;
+            for (int i = 1; i <= 10; ++i) {
+                const int PLACE = ((g_place - 1 + STEP * i) % 10 + 10) % 10 + 1;
+                if (placeHasWindows(PLACE))
+                    return go(PLACE);
+            }
+            return true;
+        }
+        int place = 0;
+        try { place = std::stoi(WHERE); } catch (...) { return false; }
+        return go(place);
+    }
+
+    // send N [stay]: the focused window to place N, at the same spot on the screen.
+    int place = 0;
+    try { place = std::stoi(action.substr(5)); } catch (...) { return false; }
+    const bool STAY   = action.ends_with(" stay");
+    const auto WINDOW = getOverviewWindowToShow(Desktop::focusState()->window());
+    const auto TARGET = shouldShowOverviewWindow(WINDOW) && !WINDOW->m_pinned ? WINDOW->layoutTarget() : nullptr;
+    if (place < 1 || place > 10 || !TARGET || place == g_place)
+        return place >= 1 && place <= 10;
+    checkpointCanvas();
+    const auto DELTA = placeCamera(place) - viewOffset->goal();
+    TARGET->setPositionGlobal(CBox{WINDOW->m_realPosition->goal() + DELTA, WINDOW->m_realSize->goal()});
+    TARGET->warpPositionSize();
+    WINDOW->sendWindowSize(true);
+    if (STAY) {
+        Desktop::focusState()->fullWindowFocus(nullptr, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+        return true;
+    }
+    go(place);
+    canvasAdoptFocus(WINDOW);
+    return true;
 }

@@ -11,7 +11,7 @@ OUT ?= spatialoverview.so
 OBJDIR = .build/obj
 
 SOURCES = main.cpp BarrelShader.cpp Config.cpp DropIndicator.cpp Experiments.cpp Hud.cpp Icons.cpp Memory.cpp Navigator.cpp OverviewGesture.cpp OverviewManager.cpp \
-          OverviewPassElement.cpp OverviewRender.cpp Popups.cpp Tuning.cpp Window.cpp scrollOverview.cpp
+          OverviewPassElement.cpp OverviewRender.cpp Popups.cpp Cursor.cpp Tuning.cpp Window.cpp scrollOverview.cpp
 OBJECTS = $(SOURCES:%.cpp=$(OBJDIR)/%.o)
 PKGS    = pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon '$(LUA_PKG) >= 5.4'
 CXXFLAGS_ALL = -fPIC $(EXTRA_FLAGS) -I.build -g -std=c++2b -Wno-narrowing `pkg-config --cflags $(PKGS)`

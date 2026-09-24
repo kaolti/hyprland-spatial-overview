@@ -111,6 +111,7 @@ float         getWorkspaceOutlineDropFillOpacity();
 bool          getCanvasEnabled();
 bool          getCanvasDesktopMode();
 bool          getCanvasPersistent();
+bool          getCanvasLinkedScreens();
 float         getCanvasInitialZoom();
 float         getCanvasMinZoom();
 float         getCanvasMaxZoom();

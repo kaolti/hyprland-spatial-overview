@@ -13,13 +13,27 @@ by yayuuu (see [Credits](#credits)).
 
 ## What it does
 
-- **One canvas for everything.** Windows float freely on a single 2D plane;
-  each monitor is a camera onto it. Pan, zoom and place windows anywhere.
+- **One canvas for everything.** Windows float freely on a single 2D plane
+  instead of in workspaces. Pan, zoom and place windows anywhere.
+- **Your screens are one desk.** Side by side on the canvas as they stand on
+  your desk, moving together: a window can sit across the seam, and dragging
+  it from one screen to the other is one continuous move.
+- **Places instead of workspaces.** `SUPER + 1` … `0` go to places on the
+  canvas, `SHIFT + SUPER + 1` … `0` take the focused window along.
 - **Type to find.** `SUPER + CTRL + G` zooms out with a search bar already
   listening. Type part of a title or app name and the camera glides to the
   best match; `Enter` lands on it at full size, `Esc` takes you back.
+- **Keyboard first.** Jump to the nearest window in any direction, nudge
+  windows around, bring a window to where you are, frame one or fit them all,
+  tidy everything up by app, undo and redo.
 - **Recent windows.** `ALT + TAB` flips between windows most recently used
   first; hold `ALT` to see the list.
+- **Fill or go fullscreen.** `SUPER + T` makes a window fill its screen and puts
+  it back. Fullscreen (`SUPER + F`, a video, a game) takes over just the screen
+  the window is on; the other screens keep the canvas.
+- **All your apps.** Wayland and X11 apps alike, games under Wine and Proton
+  included: menus, drags, fullscreen and full frame rate work as on a normal
+  desktop.
 - **It remembers.** Windows return to their spots after a restart.
 - **Tune it live.** `CTRL + ,` in the zoomed-out view opens a tuner for the
   lens, blur, grid, parallax, HUD size, type, colors and more, and you see
@@ -53,6 +67,11 @@ Hyprland shows a notification when that is the case; run the installer again:
 cd hyprland-spatial-overview && git pull && scripts/install.sh
 ```
 
+Updating never touches your `~/.config/hypr/spatialoverview.lua`, so keys added
+in a new version are not in it yet: compare it with
+[examples/spatialoverview.lua](examples/spatialoverview.lua) and copy what you
+want (or move yours aside and run the installer for a fresh one).
+
 **To uninstall**, run `scripts/uninstall.sh`. Windows go back to your normal
 layout, the lines come out of `hyprland.lua`, and the plugin is deleted. Your
 settings stay, in case you come back; `scripts/uninstall.sh --purge` deletes
@@ -68,8 +87,13 @@ them too.
 | `ALT + TAB`, `ALT + SHIFT + TAB` | Recent windows. A tap flips to the previous one; hold `ALT` for the list, release to go. |
 | `SUPER` + arrows | Focus the nearest window in that direction; the camera follows. |
 | `SUPER + SHIFT` + arrows | Nudge the focused window one grid step; hold to keep moving. |
-| `SUPER + T` | Make the focused window fill its screen; again puts it back. (Floating/tiling means nothing on the canvas.) |
-| `SUPER + F`, or an app going fullscreen | Fullscreen on the screen the window is shown on. Only that screen leaves the canvas, and comes back as it was. |
+| `SUPER + T`, `SUPER + ALT + F` | Make the focused window fill its screen, with the usual gaps; again puts it back. |
+| `SUPER + F`, or an app going fullscreen | Fullscreen on the screen the window is on; the other screens keep the canvas. `SUPER + CTRL + G` takes the screen back, going back to the window makes it fullscreen again. |
+| `SUPER + O` | Pin the window to the screen: it stays put while the canvas moves; again puts it back on the canvas. |
+| `SUPER + 1` … `0` | Go to that place on the canvas (zoomed out: the view glides there; at 100% the minimap shows on the way). |
+| `SHIFT + SUPER + 1` … `0` | Take the focused window to that place (`SHIFT + ALT + SUPER`: send it without following). |
+| `SUPER + TAB`, `SHIFT + SUPER + TAB`, `SUPER` + scroll | The next, previous place with windows; `CTRL + SUPER + TAB` the place before. |
+| `SUPER + J`, `P`, `L`, `Home`, `G`, `SHIFT + ALT + SUPER` + arrows | Tiling and grouping keys: nothing, on the canvas (every window floats). |
 | Middle-drag | Pan the canvas. |
 | `CTRL` + wheel, pinch | Zoom. |
 | `SUPER` + left-drag, right-drag | Move, resize a window. |
@@ -90,7 +114,7 @@ them too.
 | `CTRL + =`, `CTRL + -` | Zoom in, out. |
 | `CTRL + 0` | Fit every window (every match while searching). |
 | `CTRL + F` | Frame the selected window. |
-| `CTRL + A` | Tidy all windows into groups on the grid. |
+| `CTRL + A` | Tidy all windows up on the grid, by app. |
 | `CTRL + Z`, `CTRL + SHIFT + Z` | Undo, redo moves and tidying. |
 | `CTRL + ,` | Tune the look. |
 | `F1` | Every key, on screen. |
@@ -116,6 +140,7 @@ Everything can also be set in `~/.config/hypr/spatialoverview.lua` (then
 | Setting | Effect |
 | --- | --- |
 | `canvas.desktop_mode` | Enable the shared infinite-window desktop |
+| `canvas.linked_screens` | Screens show adjacent parts of the canvas and move together (default); off: each screen is its own camera |
 | `canvas.initial_zoom` | Camera zoom when desktop mode opens |
 | `canvas.min_zoom` / `max_zoom` | Continuous camera zoom limits |
 | `canvas.zoom_step` | Ctrl-wheel zoom strength |
@@ -135,6 +160,7 @@ Everything can also be set in `~/.config/hypr/spatialoverview.lua` (then
 | `animation.enabled` | Enables overview camera animation |
 | `animation.speed` | Camera animation speed |
 | `animation.bezier` | Name of the Hyprland curve used for camera motion |
+| `distortion.enabled` | The curved lens at all |
 | `distortion.strength` | Signed lens curvature; `0` is flat |
 | `distortion.shader_path` | A lens shader of your own; empty uses the one built into the plugin |
 | `distortion.edge_scale` | Overscan that keeps curved corners filled |
@@ -142,7 +168,7 @@ Everything can also be set in `~/.config/hypr/spatialoverview.lua` (then
 | `distortion.transition_power` | When the lens eases in during the zoom animation (1 follows the zoom) |
 | `canvas.grid_*` | Shared snap/render spacing, width, opacity, line/dot style, and dot diameter |
 | `canvas.background_dim` | Dark overlay behind the grid and windows in navigation mode |
-| `canvas.snap_enabled` | Snap free window placement to the canvas grid |
+| `canvas.snap_enabled` / `snap_size` | Snap free window placement to the canvas grid, and its step in pixels |
 | `canvas.remember_layout` | Remember window positions and cameras across restarts and reopenings |
 | `navigator.enabled` | Type-to-search palette in the zoomed-out canvas |
 | `navigator.labels` | Window titles on the map |
@@ -172,9 +198,14 @@ Everything can also be set in `~/.config/hypr/spatialoverview.lua` (then
 color.
 
 For scripts and bindings, `hl.plugin.spatialoverview.canvas(...)` takes
-`search [text]`, `tune`, `fill`, `switch next|prev`, `fit`, `summon`, `zoom in|out`,
-`pan <dir>`, `nudge <dir>`, `undo`, `redo`, `arrange`, `frame`, `land`, `back`
-and `refresh`.
+`search [text]`, `tune`, `fill`, `pin`, `go <place>|next|prev|back`,
+`send <place> [stay]`, `switch next|prev`, `fit`, `summon`, `zoom in|out`,
+`pan <dir>`, `nudge <dir>`, `undo`, `redo`, `arrange`, `frame`, `land`, `back`,
+`noop` (for keys that do nothing on the canvas) and `refresh`.
+`hyprctl spatialoverview` prints the canvases' state as JSON.
+
+How each key behaves on the canvas, and what the tests check, is in
+[docs/window-rules.md](docs/window-rules.md).
 
 ## Troubleshooting
 

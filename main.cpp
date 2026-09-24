@@ -7,6 +7,8 @@
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/xwayland/XSurface.hpp>
+#include <hyprland/src/xwayland/XWayland.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/event/EventBus.hpp>
@@ -47,6 +49,7 @@ static CFunctionHook* g_pPopupRepositionHook       = nullptr;
 static CFunctionHook* g_pBeginDragTargetHook       = nullptr;
 static CFunctionHook* g_pX11ConfigureHook          = nullptr;
 static CFunctionHook* g_pX11ConfigureRequestHook   = nullptr;
+static CFunctionHook* g_pX11ClientMessageHook      = nullptr;
 
 namespace Desktop::View {
     class CPopup;
@@ -318,6 +321,36 @@ static void hkX11ConfigureRequest(void* thisptr, CBox box) {
     rc<origX11ConfigureRequest>(g_pX11ConfigureRequestHook->m_original)(thisptr, canvasX11Request(thisptr, box));
 }
 
+// Hyprland re-applies an X11 app's last fullscreen request on every
+// _NET_WM_STATE message, including ones about something else: a game
+// flashing for attention when combat starts would drop out of the fullscreen
+// the user chose with SUPER + F. Only messages about fullscreen may change it.
+// (Not tied to the canvas: always hooked.)
+typedef void (*origX11ClientMessage)(void*, xcb_client_message_event_t*);
+static void hkX11ClientMessage(void* thisptr, xcb_client_message_event_t* e) {
+    const auto CALL = [&] { rc<origX11ClientMessage>(g_pX11ClientMessageHook->m_original)(thisptr, e); };
+    const auto NETWMSTATE = HYPRATOMS.find("_NET_WM_STATE");
+    const auto FULLSCREEN = HYPRATOMS.find("_NET_WM_STATE_FULLSCREEN");
+    if (!e || e->format != 32 || NETWMSTATE == HYPRATOMS.end() || FULLSCREEN == HYPRATOMS.end() || !FULLSCREEN->second || e->type != NETWMSTATE->second ||
+        e->data.data32[1] == FULLSCREEN->second || e->data.data32[2] == FULLSCREEN->second)
+        return CALL();
+
+    SP<CXWaylandSurface> surface;
+    for (const auto& window : Desktop::windowState()->windows()) {
+        if (window && window->m_isX11 && window->m_xwaylandSurface && window->m_xwaylandSurface->m_xID == e->window) {
+            surface = window->m_xwaylandSurface.lock();
+            break;
+        }
+    }
+    if (!surface)
+        return CALL();
+
+    const auto REQUESTED = surface->m_state.requestsFullscreen;
+    surface->m_state.requestsFullscreen.reset();
+    CALL();
+    surface->m_state.requestsFullscreen = REQUESTED;
+}
+
 typedef void (*origPopupReposition)(void*);
 static void hkPopupReposition(void* thisptr) {
     if (!canvasRepositionPopup(rc<Desktop::View::CPopup*>(thisptr)))
@@ -420,8 +453,12 @@ bool openCanvasOverview(PHLMONITOR monitor) {
 }
 
 void canvasFullscreenEvent(PHLWINDOW window); // scrollOverview.cpp
+bool canvasPointerMoved();
+std::string canvasStateJson();
+static SP<SHyprCtlCommand> g_stateCommand;
 void canvasFullscreenReset();
 bool canvasToggleFill(PHLWINDOW window);
+bool canvasTogglePin(PHLWINDOW window);
 
 static SDispatchResult onOverviewDispatcher(std::string arg) {
     const auto [ACTION, TARGET] = splitOverviewArg(arg);
@@ -592,10 +629,17 @@ static SDispatchResult onCanvasDispatcher(std::string arg) {
     }
     if (arg == "fill")
         return canvasToggleFill(Desktop::focusState()->window()) ? SDispatchResult{} : SDispatchResult{.success = false, .error = "Open the canvas before using this action"};
+    if (arg == "pin")
+        return canvasTogglePin(Desktop::focusState()->window()) ? SDispatchResult{} : SDispatchResult{.success = false, .error = "Open the canvas before using this action"};
+    // For keys that have nothing to do on the canvas (tiling): succeeds, so
+    // canvas_or() bindings skip their fallback, only while a canvas is open.
+    if (arg == "noop")
+        return std::ranges::any_of(scrollOverviews(), [](const auto& overview) { return overview && !overview->isClosing(); }) ? SDispatchResult{}
+                                                                                                                                : SDispatchResult{.success = false, .error = "Open the canvas before using this action"};
     if (!CANVAS)
         return arg == "refresh" ? SDispatchResult{} : SDispatchResult{.success = false, .error = "Open the canvas before using this action"};
     if (arg == "back" || arg == "land" || arg == "frame" || arg == "undo" || arg == "redo" || arg == "fit" || arg == "summon" || arg == "search" || arg == "tune" ||
-        arg.starts_with("search ") || arg.starts_with("zoom ") || arg.starts_with("pan ") || arg.starts_with("nudge ") || arg.starts_with("area ") ||
+        arg.starts_with("search ") || arg.starts_with("zoom ") || arg.starts_with("pan ") || arg.starts_with("nudge ") || arg.starts_with("area ") || arg.starts_with("go ") ||
         arg.starts_with("send "))
         return CANVAS->flightDeckAction(arg) ? SDispatchResult{} : SDispatchResult{.success = false, .error = "No matching window, area or undo state"};
 
@@ -835,6 +879,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pX11ConfigureRequestHook = HyprlandAPI::createFunctionHook(SCROLLOVERVIEW_HANDLE, findFnOrThrow("onX11ConfigureRequest", {"CWindow::onX11ConfigureRequest("}),
                                                                  rc<void*>(hkX11ConfigureRequest));
 
+    g_pX11ClientMessageHook = HyprlandAPI::createFunctionHook(SCROLLOVERVIEW_HANDLE, findFnOrThrow("handleClientMessage", {"CXWM::handleClientMessage("}),
+                                                              rc<void*>(hkX11ClientMessage));
+    if (!g_pX11ClientMessageHook || !g_pX11ClientMessageHook->hook())
+        Log::logger->log(Log::WARN, "[spatialoverview] could not hook X11 client messages; X11 apps flashing for attention may leave fullscreen");
+
     // Popups of canvas windows are kept on screen as the canvas shows them.
     g_pPopupRepositionHook = HyprlandAPI::createFunctionHook(SCROLLOVERVIEW_HANDLE, findFnOrThrow("reposition", {"Desktop::View::CPopup::reposition()"}),
                                                              rc<void*>(hkPopupReposition));
@@ -875,6 +924,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (!g_unloading)
             canvasFullscreenEvent(nullptr);
     });
+    // Screens given to a fullscreen window: a game hiding its cursor keeps
+    // the pointer on its screen, and the pointer moving onto one focuses its
+    // window. Registered before any canvas, so the canvases see the pointer
+    // where it stays.
+    static auto CANVASFULLSCREENPOINTER = Event::bus()->m_events.input.mouse.move.listen([](Vector2D, Event::SCallbackInfo& info) {
+        if (!g_unloading && canvasPointerMoved())
+            info.cancelled = true;
+    });
 
     // Recency for the navigator is tracked for the whole session, not only
     // while the canvas is open, so "recent first" means what it says.
@@ -885,6 +942,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (const auto overview = activeScrollOverview())
             overview->damage();
     });
+
+    // hyprctl spatialoverview: the canvases' state as JSON, for scripts and tests.
+    g_stateCommand = HyprlandAPI::registerHyprCtlCommand(SCROLLOVERVIEW_HANDLE, SHyprCtlCommand{.name = "spatialoverview", .exact = true, .fn = [](eHyprCtlOutputFormat, std::string) {
+                                                             return canvasStateJson();
+                                                         }});
 
     ScrollOverview::Config::registerDispatcher("overview", ::onOverviewDispatcher);
     ScrollOverview::Config::registerDispatcher("navigate", ::onNavigateDispatcher);
@@ -904,6 +966,9 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pHyprRenderer->m_renderPass.removeAllOfType("CScrollOverviewPassElement");
 
     g_unloading = true;
+    if (g_stateCommand)
+        HyprlandAPI::unregisterHyprCtlCommand(SCROLLOVERVIEW_HANDLE, g_stateCommand);
+    g_stateCommand.reset();
     canvasFullscreenReset();
     clearScrollOverviews();
     disableScrollOverviewHooks();

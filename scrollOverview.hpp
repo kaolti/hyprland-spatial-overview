@@ -66,6 +66,7 @@ class CScrollOverview : public IOverview {
     void         toggleCanvasNavigation();
     void         refreshCanvasSettings();
     bool         flightDeckAction(const std::string& action);
+    bool         canvasPlaceAction(const std::string& action);
     bool   tunerKeyAction(uint32_t keysym, uint32_t mods, const std::string& text);
     bool         navigatorKeyAction(uint32_t keysym, uint32_t mods, const std::string& text, bool repeat);
     bool         openNavigator(const std::string& query = {});
@@ -95,17 +96,26 @@ class CScrollOverview : public IOverview {
     // coordinates, which on the canvas are not where the window is drawn.
     // The screen box (global logical) as this canvas shows it, in those
     // real coordinates; nullopt when this is not a canvas desktop.
-    std::optional<CBox> canvasScreenToWorld(const CBox& screenGlobal) const;
+    std::optional<CBox> canvasScreenToWorld(const CBox& screenGlobal, bool atGoal = false) const;
+    CBox                canvasWorldToScreen(const CBox& world) const;
     bool                canvasDrawsWindow(const PHLWINDOW& window) const;
     static const CScrollOverview* canvasFrameOwner(const PHLWINDOW& window);
     bool                canvasPopupFading() const;
     // X11 windows: where this canvas draws a window (global logical), and
     // making this canvas the one an X11 window reports its position from.
     CBox                canvasDrawnGlobalBox(const PHLWINDOW& window) const;
+    static bool         canvasWindowOnScreen(const PHLWINDOW& window);
     // Make a window this canvas's selection and focus it, camera untouched.
     void                canvasAdoptFocus(const PHLWINDOW& window);
     // At 100%, where windows are drawn 1:1.
     bool                canvasAtRestZoom() const;
+    float               canvasZoom() const;
+    void                followLinkedCamera();
+    // Take `leader`'s camera from now on (its own camera change is not a lead).
+    void                followLinkedLeader(const CScrollOverview* leader);
+    // Go on to where `from` (a leader going away) was heading.
+    void                inheritLinkedCamera(const CScrollOverview* from);
+    void                syncCanvasWindowScreens();
     void                canvasClaimX11Window(const PHLWINDOW& window);
     // A client asked to be moved (or resized from an edge) by its own
     // title bar; run the canvas's drag with the button the app was pressed with.
@@ -379,6 +389,11 @@ class CScrollOverview : public IOverview {
     PHLANIMVAR<float>                scale;
     PHLANIMVAR<float>                transitionProgress;
     PHLANIMVAR<Vector2D>             viewOffset;
+    // Linked screens: the camera this canvas last took from the leader (see
+    // followLinkedCamera); a goal that differs means its own code moved it.
+    Vector2D                         linkedAppliedOffset;
+    float                            linkedAppliedScale = -1.F;
+    bool                             minimapShown = false; // the lens shader was last given a visible minimap
     PHLANIMVAR<float>                workspaceInsertProgress;
     PHLANIMVAR<float>                workspaceInsertFadeProgress;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> overviewAnimationConfig;
@@ -400,7 +415,6 @@ class CScrollOverview : public IOverview {
     CBox                             landingDestinationWorld{};
     float                            canvasPinchStartZoom = 1.F;
     PHLWINDOWREF                     navigatorHoverWindow;
-    std::string                      canvasCursorShape;
     std::unordered_set<uint32_t>     navigatorSwallowedButtons;
     // After a keyboard jump the pointer is usually resting on some other
     // window; hover focus waits until it actually enters a different one.
