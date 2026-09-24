@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Spatial Overview, install it, and load it into Hyprland.
+# Build Phantomat, install it, and load it into Hyprland.
 #
 #   scripts/install.sh            build, install, hook into hyprland.lua, load now
 #   scripts/install.sh --no-load  the same, but load it only at the next login
@@ -40,7 +40,7 @@ done
 
 # ---- requirements -------------------------------------------------------------
 
-[[ -f $hyprland_lua ]] || fail "$hyprland_lua not found. Spatial Overview needs Hyprland 0.56 or newer with its Lua config (Omarchy uses it)."
+[[ -f $hyprland_lua ]] || fail "$hyprland_lua not found. Phantomat needs Hyprland 0.56 or newer with its Lua config (Omarchy uses it)."
 
 for tool in make pkg-config g++ python3; do
   command -v "$tool" >/dev/null || fail "$tool is not installed."
@@ -63,7 +63,7 @@ fi
 
 # ---- build and install ----------------------------------------------------------
 
-say "Building Spatial Overview for Hyprland $headers"
+say "Building Phantomat for Hyprland $headers"
 make -C "$project_dir" -j"$(nproc)" all
 mkdir -p "$data_dir"
 install -m 0755 "$project_dir/spatialoverview.so" "$plugin.next"
@@ -89,18 +89,18 @@ else
   cat >>"$hyprland_lua" <<EOF
 
 $marker_begin
--- Spatial Overview: added by its scripts/install.sh; scripts/uninstall.sh removes it.
+-- Phantomat: added by its scripts/install.sh; scripts/uninstall.sh removes it.
 hl.plugin.load("$plugin")
 dofile("$settings")
 $marker_end
 EOF
-  say "Added Spatial Overview to $hyprland_lua (backup next to it)"
+  say "Added Phantomat to $hyprland_lua (backup next to it)"
 fi
 
 # ---- load it --------------------------------------------------------------------
 
 if ((!load_now)) || ! hyprland_session; then
-  say "Done. Spatial Overview loads at your next login."
+  say "Done. Phantomat loads at your next login."
   exit 0
 fi
 if ((!hooked)); then
@@ -130,5 +130,5 @@ fi
 # An update brings the canvas straight back, windows where they were.
 ((was_running)) && hyprctl dispatch 'hl.plugin.spatialoverview.overview("on all")' >/dev/null
 
-say "Spatial Overview is running. Press SUPER + CTRL + G, type to find a window, Enter to go there."
+say "Phantomat is running. Press SUPER + CTRL + G, type to find a window, Enter to go there."
 say "In the zoomed-out canvas, CTRL + , tunes the look and F1 lists every key."

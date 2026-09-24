@@ -1,9 +1,12 @@
-# Spatial Overview
+# Phantomat
 
-An infinite canvas for Hyprland. Every window lives on one endless,
-zoomable plane instead of in workspaces. Press a key and the view pulls back
-through a curved lens so you can see everything at once, then type a few
+A zoomable, infinite-canvas window manager for Hyprland. Every window lives
+on one endless plane instead of in workspaces. Press a key and the view pulls
+back through a curved lens so you can see everything at once, then type a few
 letters and fly straight to the window you want.
+
+The name comes from Stanisław Lem's *Summa Technologiae*, where a phantomat
+is a machine that builds a whole world around the person inside it.
 
 <!-- Demo video: drag the recording into this spot in GitHub's editor. -->
 
@@ -50,8 +53,8 @@ Arch or Omarchy:
 
 ```sh
 sudo pacman -S --needed base-devel git hyprland hyprgraphics pango lua
-git clone https://github.com/kaolti/hyprland-spatial-overview.git
-cd hyprland-spatial-overview
+git clone https://github.com/kaolti/phantomat.git
+cd phantomat
 scripts/install.sh
 ```
 
@@ -60,11 +63,16 @@ copies the default settings to `~/.config/hypr/spatialoverview.lua` (it never
 overwrites yours), adds two marked lines to your `hyprland.lua` (after making a
 backup), and loads it right away. Then press `SUPER + CTRL + G`.
 
+Phantomat used to be called Spatial Overview, and inside it still is: the
+settings file, the `hl.plugin.spatialoverview` actions and the
+`hyprctl spatialoverview` command keep that name, so configs from before the
+rename keep working.
+
 **After a Hyprland update**, the plugin has to be rebuilt for the new version.
 Hyprland shows a notification when that is the case; run the installer again:
 
 ```sh
-cd hyprland-spatial-overview && git pull && scripts/install.sh
+cd phantomat && git pull && scripts/install.sh
 ```
 
 Updating never touches your `~/.config/hypr/spatialoverview.lua`, so keys added
@@ -230,7 +238,7 @@ are. The tests run a nested Hyprland in a window (`tests/*-nested.py`);
 
 ## Credits
 
-Spatial Overview began as a fork of
+Phantomat began as a fork of
 [hyprland-scroll-overview](https://github.com/yayuuu/hyprland-scroll-overview)
 by yayuuu (Daniel Skorupa) and its contributors, which grew out of the plugin
 work of Vaxry and the Hypr Development team. Their code and history are

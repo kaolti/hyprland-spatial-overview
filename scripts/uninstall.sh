@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove Spatial Overview: unload it (windows go back to your normal layout),
+# Remove Phantomat: unload it (windows go back to your normal layout),
 # take it out of hyprland.lua, and delete the installed plugin.
 #
 #   scripts/uninstall.sh          keep your settings, in case you come back
@@ -59,9 +59,9 @@ for line in lines:
     out.append(line)
 open(path, "w").write("\n".join(out))
 PY
-  say "Removed Spatial Overview from $hyprland_lua (backup next to it)"
+  say "Removed Phantomat from $hyprland_lua (backup next to it)"
 elif [[ -f $hyprland_lua ]] && grep -q 'spatialoverview' "$hyprland_lua"; then
-  say "Your hyprland.lua loads Spatial Overview in a way the installer did not write; remove those lines yourself:"
+  say "Your hyprland.lua loads Phantomat in a way the installer did not write; remove those lines yourself:"
   grep -n 'spatialoverview' "$hyprland_lua" | sed 's/^/  /'
 fi
 
@@ -71,7 +71,7 @@ say "Deleted $data_dir"
 if ((purge)); then
   rm -f "$config_dir/spatialoverview.lua" "$config_dir/spatialoverview-tuning.lua"
   rm -rf "$state_dir"
-  say "Deleted your Spatial Overview settings, tuning and window memory"
+  say "Deleted your Phantomat settings, tuning and window memory"
 else
   say "Kept your settings: $config_dir/spatialoverview.lua and spatialoverview-tuning.lua (--purge deletes them)"
 fi
@@ -79,4 +79,4 @@ fi
 if hyprland_session; then
   hyprctl reload >/dev/null
 fi
-say "Spatial Overview is uninstalled."
+say "Phantomat is uninstalled."

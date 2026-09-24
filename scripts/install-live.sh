@@ -37,4 +37,4 @@ if [[ -n "$config_errors" ]]; then
 fi
 
 hyprctl dispatch 'hl.plugin.spatialoverview.overview("on all")'
-echo "Spatial Overview is live. SUPER + CTRL + G, then type."
+echo "Phantomat is live. SUPER + CTRL + G, then type."

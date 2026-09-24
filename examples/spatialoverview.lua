@@ -1,4 +1,4 @@
--- Spatial Overview: an infinite canvas for Hyprland 0.56+ (made on Omarchy).
+-- Phantomat: a zoomable, infinite-canvas window manager for Hyprland 0.56+ (made on Omarchy).
 --
 --   SUPER + CTRL + G   the zoomed-out canvas; type to search, Enter to go
 --   CTRL + ,           (in the canvas) tune the look live; F1 lists every key

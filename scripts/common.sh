@@ -63,7 +63,7 @@ safe_unload() {
   hyprctl plugin unload "$helper" >/dev/null || true
 
   if ! grep -q '^unloaded 1' "$report" 2>/dev/null; then
-    echo "Could not unload the running Spatial Overview safely; nothing was changed." >&2
+    echo "Could not unload the running Phantomat safely; nothing was changed." >&2
     [[ -f "$report" ]] && sed 's/^/  /' "$report" >&2
     rm -f "$report"
     return 1
@@ -71,7 +71,7 @@ safe_unload() {
   local checked repaired repaired_after unresolved
   read -r _ checked repaired _ < <(grep '^before ' "$report")
   read -r _ _ repaired_after unresolved < <(grep '^after ' "$report")
-  echo "Unloaded the running Spatial Overview ($checked windows checked, $((repaired + repaired_after)) layouts repaired)."
+  echo "Unloaded the running Phantomat ($checked windows checked, $((repaired + repaired_after)) layouts repaired)."
   if (( unresolved > 0 )); then
     echo "Warning: $unresolved window layouts could not be repaired; avoid toggling floating on them until you log out and back in." >&2
   fi

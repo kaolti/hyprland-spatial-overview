@@ -821,7 +821,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     if (HASH != CLIENT_HASH) {
         // The usual cause: Hyprland was updated after this build.
         failNotif("this build is for a different Hyprland version (Hyprland was probably updated). Rebuild it: run scripts/install.sh in the "
-                  "Spatial Overview source folder");
+                  "Phantomat source folder");
         throw std::runtime_error("[he] Version mismatch");
     }
 
@@ -955,7 +955,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     ScrollOverview::Config::registerGesture(::onRegisterOverviewGesture, ::overviewGestureKeyword);
     ScrollOverview::Config::registerConfig();
 
-    return {"spatialoverview", "An infinite canvas for Hyprland: one zoomable plane of windows, type-to-find, live tuning", "Kaolti, yayuuu, Vaxry", SCROLLOVERVIEW_VERSION};
+    return {"spatialoverview", "Phantomat: a zoomable, infinite-canvas window manager for Hyprland", "Kaolti, yayuuu, Vaxry", SCROLLOVERVIEW_VERSION};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

@@ -1,9 +1,9 @@
 [repository]
-name = "spatial-overview"
+name = "phantomat"
 authors = ["kaolti", "yayuuu", "Vaxry"]
 
 [spatialoverview]
-description = "An infinite canvas for Hyprland: one zoomable plane of windows, type-to-find, live tuning."
+description = "Phantomat: a zoomable, infinite-canvas window manager for Hyprland."
 authors = ["kaolti", "yayuuu", "Vaxry"]
 output = "spatialoverview.so"
 build = [

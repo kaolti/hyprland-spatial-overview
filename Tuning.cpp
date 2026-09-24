@@ -223,7 +223,7 @@ namespace SpatialOverview::Tuning {
             entries[key] = value;
 
             std::ostringstream out;
-            out << "-- Written by the Spatial Overview tuner (Ctrl+, in the zoomed-out canvas).\n"
+            out << "-- Written by the Phantomat tuner (Ctrl+, in the zoomed-out canvas).\n"
                    "-- Applied after spatialoverview.lua, so these win. Delete a line to hand\n"
                    "-- that setting back to spatialoverview.lua.\n"
                    "return {\n";
