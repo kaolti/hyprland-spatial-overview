@@ -4192,9 +4192,11 @@ std::string canvasStateJson() {
         const auto MONITOR = entry.monitor.lock();
         fullscreen += std::format("{}{{\"window\": {}, \"monitor\": {}}}", fullscreen.empty() ? "" : ", ", jsonString(WINDOW ? WINDOW->m_title : ""), jsonString(MONITOR ? MONITOR->m_name : ""));
     }
-    const auto* LEADER = g_linkedLeader;
-    return std::format("{{\"linked\": {}, \"leader\": {}, \"screens\": [{}], \"fullscreen\": [{}], \"filled\": [{}]}}\n", ScrollOverview::Config::getCanvasLinkedScreens() ? "true" : "false",
-                       jsonString(LEADER && LEADER->canvasMonitor() ? LEADER->canvasMonitor()->m_name : ""), screens, fullscreen, canvasFillJson());
+    const auto* LEADER   = g_linkedLeader;
+    const auto  SELECTED = SpatialOverview::Navigator::isOpen() ? SpatialOverview::Navigator::selectedWindow() : PHLWINDOW{};
+    return std::format("{{\"linked\": {}, \"leader\": {}, \"screens\": [{}], \"fullscreen\": [{}], \"filled\": [{}], \"selected\": {}}}\n",
+                       ScrollOverview::Config::getCanvasLinkedScreens() ? "true" : "false", jsonString(LEADER && LEADER->canvasMonitor() ? LEADER->canvasMonitor()->m_name : ""),
+                       screens, fullscreen, canvasFillJson(), jsonString(SELECTED ? SELECTED->m_title : ""));
 }
 
 // ---- Fill the screen (Super+T on the canvas) ---------------------------------------
@@ -6519,12 +6521,45 @@ bool CScrollOverview::moveSelection(const std::string& direction) {
         if (!shouldShowOverviewWindow(CURRENT))
             CURRENT.reset();
 
+        // Where a window is, seen along the arrow: its near and far edge
+        // along it (flipped so the arrow points to larger values) and its span
+        // across it. Always from where the windows are now.
+        struct SAlong {
+            double nearEdge = 0, farEdge = 0, acrossMin = 0, acrossMax = 0;
+        };
+        const bool HORIZONTAL = MOVINGLEFT || MOVINGRIGHT;
+        const bool FORWARD    = MOVINGRIGHT || MOVINGDOWN;
+        const auto along      = [&](const CBox& box) {
+            const double MIN = HORIZONTAL ? box.x : box.y, MAX = MIN + (HORIZONTAL ? box.width : box.height);
+            const double ACROSS = HORIZONTAL ? box.y : box.x, ACROSSMAX = ACROSS + (HORIZONTAL ? box.height : box.width);
+            return FORWARD ? SAlong{MIN, MAX, ACROSS, ACROSSMAX} : SAlong{-MAX, -MIN, ACROSS, ACROSSMAX};
+        };
+
+        struct SCandidate {
+            PHLWINDOW window;
+            double    gap = 0, reach = 0, weighted = 0;
+            bool      inLine = false, beyond = false;
+        };
         std::unordered_set<const void*> visited;
-        PHLWINDOW                      bestCandidate;
-        bool                           bestAligned = false;
-        double                         bestScore = std::numeric_limits<double>::max();
-        const auto CURRENTBOX    = CURRENT ? CURRENT->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT) : CBox{};
-        const auto CURRENTCENTER = CURRENTBOX.middle();
+        std::optional<SCandidate>       best;
+        PHLWINDOW                       bestCandidate;
+        const auto CURRENTBOX = CURRENT ? CURRENT->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT) : CBox{};
+        const auto FROM       = along(CURRENTBOX);
+
+        // Which of two windows the arrow means (the rules Android uses for
+        // arrow keys): one in line with the current window (their spans
+        // across the arrow overlap) wins over one that is not, unless, going
+        // up or down, that one is wholly nearer; otherwise the nearer, with
+        // an offset sideways counting less than distance along the arrow.
+        const auto better = [&](const SCandidate& a, const SCandidate& b) {
+            if (a.inLine != b.inLine) {
+                const auto& IN = a.inLine ? a : b;
+                const auto& OUT = a.inLine ? b : a;
+                const bool  INWINS = !OUT.beyond || HORIZONTAL || IN.gap < OUT.reach;
+                return a.inLine ? INWINS : !INWINS;
+            }
+            return a.weighted < b.weighted;
+        };
 
         for (const auto& windowRef : Desktop::windowState()->windows()) {
             const auto WINDOW = getOverviewWindowToShow(windowRef);
@@ -6542,35 +6577,34 @@ bool CScrollOverview::moveSelection(const std::string& direction) {
                 break;
             }
 
-            const auto BOX    = WINDOW->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
-            const auto CENTER = BOX.middle();
-            const auto DELTA  = CENTER - CURRENTCENTER;
-            const double PRIMARY = MOVINGRIGHT ? DELTA.x : MOVINGLEFT ? -DELTA.x : MOVINGDOWN ? DELTA.y : -DELTA.y;
-            if (PRIMARY <= 0.F)
+            // It has to reach further that way than the current window, with
+            // both edges: a wide window's neighbour below is not to its left
+            // just because its middle is. And some of it has to be within 45°
+            // of that side, or it is beside the window, not beyond it.
+            const auto TO = along(WINDOW->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT));
+            if (TO.nearEdge <= FROM.nearEdge || TO.farEdge <= FROM.farEdge)
+                continue;
+            const double REACH  = TO.farEdge - FROM.farEdge;
+            const double ASIDE  = std::max({0.0, TO.acrossMin - FROM.acrossMax, FROM.acrossMin - TO.acrossMax});
+            if (ASIDE >= REACH)
                 continue;
 
-            const bool HORIZONTAL = MOVINGLEFT || MOVINGRIGHT;
-            const double SECONDARY = HORIZONTAL ? std::abs(DELTA.y) : std::abs(DELTA.x);
-            const double CURRENTMIN = HORIZONTAL ? CURRENTBOX.y : CURRENTBOX.x;
-            const double CURRENTMAX = CURRENTMIN + (HORIZONTAL ? CURRENTBOX.height : CURRENTBOX.width);
-            const double CANDIDATEMIN = HORIZONTAL ? BOX.y : BOX.x;
-            const double CANDIDATEMAX = CANDIDATEMIN + (HORIZONTAL ? BOX.height : BOX.width);
-            const double SECONDARYGAP = std::max({0.0, CANDIDATEMIN - CURRENTMAX, CURRENTMIN - CANDIDATEMAX});
-            const bool   ALIGNED      = SECONDARYGAP <= 0.001;
-
-            // Prefer windows whose perpendicular spans overlap: Right from a
-            // row should stay in that row, and Up from a column should stay in
-            // that column. Diagonal candidates remain a distance-weighted
-            // fallback when there is no aligned window.
-            const double SCORE = ALIGNED ? PRIMARY + SECONDARY * 0.15 : std::hypot(PRIMARY, SECONDARY) + SECONDARY * 0.75;
-            if (bestCandidate && ((!ALIGNED && bestAligned) || (ALIGNED == bestAligned && SCORE >= bestScore)))
-                continue;
-
-            bestCandidate = WINDOW;
-            bestAligned   = ALIGNED;
-            bestScore     = SCORE;
+            const double GAP    = std::max(0.0, TO.nearEdge - FROM.farEdge);
+            const double OFFSET = (TO.acrossMin + TO.acrossMax - FROM.acrossMin - FROM.acrossMax) / 2.0;
+            SCandidate   candidate{
+                  .window   = WINDOW,
+                  .gap      = GAP,
+                  .reach    = REACH,
+                  .weighted = 13.0 * GAP * GAP + OFFSET * OFFSET,
+                  .inLine   = TO.acrossMax > FROM.acrossMin && TO.acrossMin < FROM.acrossMax,
+                  .beyond   = TO.nearEdge >= FROM.farEdge,
+            };
+            if (!best || better(candidate, *best))
+                best = candidate;
         }
 
+        if (best)
+            bestCandidate = best->window;
         if (!bestCandidate)
             return false;
 

@@ -33,6 +33,14 @@ them (`tests/*-nested.py`; most take `NESTED_SCALE=1.25` for scaled screens).
 - **Landing on a window brings it in front.** *keys*
 - **Focus follows the pointer between screens**, also onto a screen given to a
   fullscreen window. *fullscreen-cases*
+- **Arrows go where they point.** SUPER + arrows at 100% and the arrows in the
+  zoomed-out view pick the nearest window that way, from where the windows are
+  now (after a drag or a tidy-up too), across both screens. It has to reach
+  further that way than the current one with both edges, and lie that way
+  rather than off to the side (some of it within 45°). A window in line with
+  the current one (the same row or column) comes first; going up or down, a
+  window off the line wins if it is wholly nearer. With nothing that way the
+  selection stays. *arrows*
 
 ## Fill (SUPER + T, SUPER + ALT + F)
 
@@ -104,7 +112,8 @@ same view, zooming out and back changes nothing. *keys*
 
 For scripts, `hyprctl spatialoverview` prints the canvases' state as JSON:
 each screen's zoom and view, whether it is zoomed out, the windows that are
-fullscreen on a screen of their own, and the filled ones.
+fullscreen on a screen of their own, the filled ones, and the window selected
+in the zoomed-out view.
 
 ## Planned: a canvas for each screen
 
