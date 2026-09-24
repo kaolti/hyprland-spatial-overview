@@ -52,7 +52,11 @@ SP<IOverview>                     activeScrollOverview();
 void                              closeAll();
 void                              registerScrollOverview(const SP<IOverview>& overview);
 void                              unregisterScrollOverview(IOverview* overview);
+void                              unregisterScrollOverviewForMonitor(PHLMONITOR monitor);
 void                              clearScrollOverviews();
 
 // Current interaction/render context. The authoritative state is the registry.
 inline SP<IOverview> g_pScrollOverview;
+
+// Set while an overview is torn down because its output is disconnecting.
+inline bool g_overviewMonitorTeardown = false;

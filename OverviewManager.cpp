@@ -65,6 +65,12 @@ void unregisterScrollOverview(IOverview* overview) {
     g_pScrollOverview = activeScrollOverview();
 }
 
+void unregisterScrollOverviewForMonitor(PHLMONITOR monitor) {
+    const auto overview = scrollOverviewForMonitor(monitor);
+    if (overview)
+        unregisterScrollOverview(overview.get());
+}
+
 void clearScrollOverviews() {
     auto overviews = std::move(g_scrollOverviews);
     g_scrollOverviews.clear();

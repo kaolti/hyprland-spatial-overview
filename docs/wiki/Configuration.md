@@ -1,3 +1,0 @@
-- [Basic configuration](Basic-configuration.md) — plugin options, gestures, and configuration examples
-- [Dispatchers](Dispatchers.md) — commands for controlling the overview, navigation, and windows
-- [Keybind submap](Keybind-submap.md) — customize input handling while the overview is open

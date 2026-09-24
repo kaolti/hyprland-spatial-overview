@@ -1,4 +1,4 @@
-project('scrolloverview', 'cpp',
+project('spatialoverview', 'cpp',
   version: '0.1',
   default_options: ['buildtype=release'],
 )
@@ -18,7 +18,8 @@ add_project_arguments(
   ],
   language: 'cpp')
 
-globber = run_command('find', '.', '-name', '*.cpp', check: true)
+# The plugin is the top-level sources only (scripts/ and tests/ hold separate tools).
+globber = run_command('find', '.', '-maxdepth', '1', '-name', '*.cpp', check: true)
 src = globber.stdout().strip().split('\n')
 
 version_header = custom_target(
@@ -39,6 +40,7 @@ shared_module(meson.project_name(), src + [version_header],
   include_directories: include_directories('.'),
   dependencies: [
     dependency('hyprland'),
+    dependency('hyprgraphics'),
     dependency('pixman-1'),
     dependency('libdrm'),
     dependency('pangocairo'),

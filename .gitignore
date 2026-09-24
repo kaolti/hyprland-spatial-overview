@@ -2,6 +2,8 @@ build/
 .build/
 .cache/
 scrolloverview.so
+spatialoverview.so
+spatialoverview.so.next
 
 # Nix
 result/
@@ -9,3 +11,10 @@ result
 result-*
 .envrc
 .direnv/
+
+# Flight Deck fixture build outputs
+__pycache__/
+tests/fixtures/x11-probe
+tests/fixtures/pointer-probe
+tests/fixtures/virtual-pointer.c
+tests/fixtures/virtual-pointer.h

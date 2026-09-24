@@ -392,13 +392,39 @@ static void scaleOverviewChildSurfaceGeometry(const PHLWINDOW& window, const Vec
     }
 }
 
-static void raiseWindowPopups(const PHLWINDOW& window, size_t firstElement) {
+static void raiseWindowPopups(const PHLWINDOW& window, size_t firstElement, const std::optional<Render::SRenderModifData>& popupTransform = std::nullopt) {
     if (!window)
         return;
 
     auto& passElements = g_pHyprRenderer->m_renderPass.m_passElements;
     if (firstElement >= passElements.size())
         return;
+
+    if (popupTransform) {
+        using TPassElement = std::remove_reference_t<decltype(passElements)>::value_type;
+        std::vector<TPassElement> popups;
+
+        for (auto it = passElements.begin() + firstElement; it != passElements.end();) {
+            const auto* surfacePassElement = it->element ? dc<const CSurfacePassElement*>(it->element.get()) : nullptr;
+            if (!surfacePassElement || surfacePassElement->m_data.pWindow != window || !surfacePassElement->m_data.popup) {
+                ++it;
+                continue;
+            }
+
+            popups.emplace_back(std::move(*it));
+            it = passElements.erase(it);
+        }
+
+        if (popups.empty())
+            return;
+
+        g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = *popupTransform}));
+        for (auto& popup : popups)
+            passElements.emplace_back(std::move(popup));
+        g_pHyprRenderer->m_renderPass.add(
+            makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = Render::SRenderModifData{}}));
+        return;
+    }
 
     // renderWindow queues popups after the main surface, but overview adds its
     // own decorations and border afterwards. Keep every non-popup element in
@@ -984,28 +1010,66 @@ void renderOverviewWindow(const SRenderParams& params) {
     const auto     WORKSPACE               = params.window->m_workspace;
     const bool     OVERRIDEWORKSPACEOFFSET = WORKSPACE && !params.window->m_pinned;
     const Vector2D previousWorkspaceOffset = OVERRIDEWORKSPACEOFFSET ? WORKSPACE->m_renderOffset->value() : Vector2D{};
+    const float    previousWorkspaceAlpha  = OVERRIDEWORKSPACEOFFSET && WORKSPACE->m_alpha ? WORKSPACE->m_alpha->value() : 1.F;
+    std::optional<Render::SRenderModifData> cameraTransform;
 
-    params.window->positionAnimation()->value() = params.monitor->m_position + params.windowBox.pos() / params.monitor->m_scale - params.window->m_floatingOffset;
-    params.window->sizeAnimation()->value()     = params.windowBox.size() / params.monitor->m_scale;
-    params.window->m_animatingIn                 = true;
-    COverviewAnimatedVariableAccess::setBeingAnimated(params.window->sizeAnimation().get(), true);
-    if (OVERRIDEWORKSPACEOFFSET)
+    if (params.cameraTransform && params.monitor) {
+        const auto SOURCEGEOMETRY = params.window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+        const CBox SOURCEBOX{
+            (SOURCEGEOMETRY.pos() - params.monitor->m_position) * params.monitor->m_scale,
+            SOURCEGEOMETRY.size() * params.monitor->m_scale,
+        };
+
+        Render::SRenderModifData transform;
+        transform.modifs.emplace_back(Render::SRenderModifData::RMOD_TYPE_SCALE, params.renderScale);
+        transform.modifs.emplace_back(Render::SRenderModifData::RMOD_TYPE_TRANSLATE,
+                                      params.windowBox.pos() - SOURCEBOX.pos() * params.renderScale);
+        cameraTransform = std::move(transform);
+    }
+
+    if (!cameraTransform) {
+        params.window->positionAnimation()->value() = params.monitor->m_position + params.windowBox.pos() / params.monitor->m_scale - params.window->m_floatingOffset;
+        params.window->sizeAnimation()->value()     = params.windowBox.size() / params.monitor->m_scale;
+        params.window->m_animatingIn                 = true;
+        COverviewAnimatedVariableAccess::setBeingAnimated(params.window->sizeAnimation().get(), true);
+    }
+    if (OVERRIDEWORKSPACEOFFSET) {
         WORKSPACE->m_renderOffset->value() = {};
+        // Persistent canvas can outlive the workspace. Newly-created or
+        // hidden special workspaces therefore legitimately carry alpha 0,
+        // but their live surfaces must remain visible on the canvas. Hyprland
+        // snapshots this value into each queued surface pass, so override only
+        // the current value while queuing and restore it synchronously below.
+        if (WORKSPACE->m_alpha)
+            WORKSPACE->m_alpha->value() = 1.F;
+    }
 
     auto restoreWindowGeometry = Hyprutils::Utils::CScopeGuard([&] {
-        params.window->positionAnimation()->value() = previousWindowPos;
-        params.window->sizeAnimation()->value()     = previousWindowSize;
-        params.window->m_animatingIn                 = previousAnimatingIn;
-        COverviewAnimatedVariableAccess::setBeingAnimated(params.window->sizeAnimation().get(), previousSizeAnimating);
-        if (OVERRIDEWORKSPACEOFFSET && WORKSPACE)
+        if (!cameraTransform) {
+            params.window->positionAnimation()->value() = previousWindowPos;
+            params.window->sizeAnimation()->value()     = previousWindowSize;
+            params.window->m_animatingIn                 = previousAnimatingIn;
+            COverviewAnimatedVariableAccess::setBeingAnimated(params.window->sizeAnimation().get(), previousSizeAnimating);
+        }
+        if (OVERRIDEWORKSPACEOFFSET && WORKSPACE) {
             WORKSPACE->m_renderOffset->value() = previousWorkspaceOffset;
+            if (WORKSPACE->m_alpha)
+                WORKSPACE->m_alpha->value() = previousWorkspaceAlpha;
+        }
     });
 
     const size_t firstWindowPassElement = g_pHyprRenderer->m_renderPass.m_passElements.size();
     const bool   usePrecomputedBlur     = shouldUsePrecomputedBlur(params.window, params.monitor, params.workspaceBox, &params.windowBox, params.dragged);
+    if (cameraTransform)
+        g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = *cameraTransform}));
     g_pHyprRenderer->renderWindow(params.window, params.monitor, params.now, false, Render::RENDER_PASS_ALL, false, false);
-    const Vector2D targetWindowPosition = params.monitor->m_position + params.windowBox.pos() / params.monitor->m_scale;
-    scaleOverviewChildSurfaceGeometry(params.window, targetWindowPosition, params.window->sizeAnimation()->value(), firstWindowPassElement);
+    if (cameraTransform)
+        g_pHyprRenderer->m_renderPass.add(
+            makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = Render::SRenderModifData{}}));
+    else {
+        const Vector2D targetWindowPosition = params.monitor->m_position + params.windowBox.pos() / params.monitor->m_scale;
+        scaleOverviewChildSurfaceGeometry(params.window, targetWindowPosition, params.window->sizeAnimation()->value(), firstWindowPassElement);
+    }
     if (!usePrecomputedBlur)
         blockOverviewWindowBlurOptimization(params.window, firstWindowPassElement);
     roundStandaloneWindowPassElements(params.window, params.monitor, params.renderScale, firstWindowPassElement);
@@ -1021,7 +1085,12 @@ void renderOverviewWindow(const SRenderParams& params) {
     if (!fullscreen)
         renderOverviewWindowBorder(params.monitor, params.window, params.windowBox, metrics, params.selected);
 
-    raiseWindowPopups(params.window, firstWindowPassElement);
+    raiseWindowPopups(params.window, firstWindowPassElement, cameraTransform);
+    const bool previousNoSimplify = g_pHyprRenderer->m_renderData.noSimplify;
+    if (cameraTransform)
+        g_pHyprRenderer->m_renderData.noSimplify = true;
+    auto restoreNoSimplify = Hyprutils::Utils::CScopeGuard(
+        [previousNoSimplify] { g_pHyprRenderer->m_renderData.noSimplify = previousNoSimplify; });
     OverviewRender::flushPass(params.monitor);
 }
 

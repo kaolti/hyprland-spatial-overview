@@ -14,6 +14,7 @@
 #include <chrono>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Config.hpp"
@@ -53,8 +54,56 @@ class CScrollOverview : public IOverview {
     void         selectHoveredWorkspace() override;
     bool         moveSelection(const std::string& direction) override;
     bool         windowDispatcherAction(const std::string& action) override;
+    bool         placeWindowOnCanvasCell(int x, int y);
+    bool         setCanvasViewport(int x, int y);
+    bool         arrangeCanvasWindows();
+    const std::string& canvasPlacementError() const;
+    float        overviewProgress() const;
+    float        distortionProgress() const;
+    bool         isCanvasDesktop() const;
+    bool         isPersistentCanvas() const;
+    bool         isCanvasNavigationActive() const;
+    void         toggleCanvasNavigation();
+    void         refreshCanvasSettings();
+    bool         flightDeckAction(const std::string& action);
+    bool   tunerKeyAction(uint32_t keysym, uint32_t mods, const std::string& text);
+    bool         navigatorKeyAction(uint32_t keysym, uint32_t mods, const std::string& text, bool repeat);
+    bool         openNavigator(const std::string& query = {});
+    void         landOnWindow(PHLWINDOW window);
+    void         summonWindow(PHLWINDOW window);
+    void         revertAllNavigation();
+    void         fitAllWindows();
+    void         panCamera(const Vector2D& direction);
+    void         zoomCameraBy(float factor);
+    bool         nudgeWindow(PHLWINDOW window, const Vector2D& direction, bool checkpoint);
+    bool         canvasRedo();
+    bool         switchWindow(int direction);
+    void         revealSwitcher();
+    void         finishSwitcher(bool cancel = false);
+    bool         cycleAltTab(int direction);
+    void         noteCanvasLayoutChanged();
+    Vector2D     restingCameraOffset() const;
+    void         saveSharedCanvasLayout();
+    void         loadSharedCanvasLayout();
+    void         checkpointCanvas();
+    Vector2D     navigationReturnOffset{};
+    bool         hasNavigationReturn = false;
 
     void         fullRender() override;
+
+    // Popups: Hyprland places and fades them in the window's real
+    // coordinates, which on the canvas are not where the window is drawn.
+    // The screen box (global logical) as this canvas shows it, in those
+    // real coordinates; nullopt when this is not a canvas desktop.
+    std::optional<CBox> canvasScreenToWorld(const CBox& screenGlobal) const;
+    bool                canvasDrawsWindow(const PHLWINDOW& window) const;
+    bool                canvasPopupFading() const;
+    // A client asked to be moved (or resized from an edge) by its own
+    // title bar; run the canvas's drag with the button the app was pressed with.
+    bool                beginClientWindowGesture(PHLWINDOW window, std::optional<Layout::eRectCorner> resizeEdge);
+    PHLMONITOR          canvasMonitor() const {
+        return pMonitor.lock();
+    }
 
   private:
     void   rebuildWorkspaceImages();
@@ -63,16 +112,54 @@ class CScrollOverview : public IOverview {
     void   onWorkspaceChange();
     void   renderGlobalWallpaper(PHLMONITOR monitor, const Time::steady_tp& now);
     void   renderWallpaperLayers(PHLMONITOR monitor, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha = 1.F);
+    // Parallax: the wallpaper as a far layer, shifted by a fraction of the
+    // camera's movement and scaled with the zoom. Inactive leaves it untouched.
+    struct SBackdropTransform {
+        Vector2D offset; // device px
+        float    scale  = 1.F;
+        bool     active = false;
+    };
+    SBackdropTransform canvasBackdropTransform(PHLMONITOR monitor, float renderScale) const;
+    bool   updateBackdropSharpCache(PHLMONITOR monitor, const Time::steady_tp& now);
+    void   renderBackdropTiled(PHLMONITOR monitor, const SP<Render::ITexture>& texture, float alpha, const SBackdropTransform& transform);
     void   updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperMode, const Time::steady_tp& now);
-    void   renderBackdropBlurCache(PHLMONITOR monitor);
+    void   renderBackdropBlurCache(PHLMONITOR monitor, float alpha, const SBackdropTransform& transform);
     void   renderWorkspaceBackground(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now);
     void   renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now);
+    void   renderWorkspaceOutline(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale);
+    void   renderCanvasBackgroundDim(PHLMONITOR monitor);
+    void   renderCanvasGrid(PHLMONITOR monitor, size_t activeIdx, float workspacePitch, float renderScale);
+    void   renderCanvasMinimap(PHLMONITOR monitor);
+    void   renderExperimentChrome(PHLMONITOR monitor);
+    bool   handleExperimentKey(uint32_t keysym, uint32_t mods);
+    bool   handleExperimentClick(uint32_t button, uint32_t state, const Vector2D& rawLocal);
+    void   updateExperimentDrag();
+    bool   jumpCanvasMinimap(const Vector2D& rawLocal);
+    CBox   currentCanvasViewportWorld() const;
+    void   commitLanding();
+    void   revertNavigation();
+    bool   handleNavigatorKey(const IKeyboard::SKeyEvent& event, uint32_t keysym, uint32_t mods);
+    void   followNavigatorSelection();
+    bool   navigatorOwnsPointer() const;
+    bool   showsNavigatorHud() const;
+    void   updateNavigatorHover();
+    void   setCanvasCursor(const std::string& shape);
+    void   leaveNavigatorPointer();
+    Vector2D canvasCameraOffsetFor(const PHLWINDOW& window, float zoom, bool navigating) const;
+    void   renderNavigatorWindowOverlay(PHLMONITOR monitor, PHLWINDOW window, const CBox& windowBox);
+    void   renderNavigatorReticle(PHLMONITOR monitor, const Time::steady_tp& now);
+    void   renderNavigatorHud(PHLMONITOR monitor);
+    CBox   canvasArrangeButtonBox() const;
+    void   renderCanvasViewport(PHLMONITOR monitor, float renderScale);
+    void   renderCanvasDesktopScene(PHLMONITOR monitor, float renderScale, const Time::steady_tp& now);
+    void   renderChromeLayers(PHLMONITOR monitor, const Time::steady_tp& now);
     bool   hasVisiblePrecomputedBlurWindow(PHLMONITOR monitor, size_t activeIdx, float workspacePitch, float renderScale) const;
     void   renderWindowLive(PHLMONITOR monitor, PHLWINDOW window, const CBox& windowBox, float renderScale, const Time::steady_tp& now, const CBox* workspaceBox = nullptr,
                              bool dragged = false);
     void   renderDraggedWindow(PHLMONITOR monitor, size_t activeIdx, float workspacePitch, float renderScale, const Time::steady_tp& now);
     void   renderPinnedFloatingWindows(PHLMONITOR monitor, float overviewScale, const Time::steady_tp& now);
     void   moveViewportWorkspace(bool up);
+    void   moveViewportWorkspaceTo(size_t targetIndex);
     void   trackpadSwipeLayout(const PHLWORKSPACE target, const double delta);
     void   trackpadSwipeWorkspace(const double delta);
     void   finishWorkspaceScrollFollow();
@@ -87,8 +174,10 @@ class CScrollOverview : public IOverview {
     size_t dragWorkspaceIndex(PHLWINDOW window) const;
     void   updateWorkspaceOverflow();
     CBox   workspaceOverviewVisibleBox(size_t workspaceIdx, const CBox& workspaceBox, float renderScale, PHLMONITOR monitor) const;
-    float      workspaceOverviewOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
+    float      workspaceOverviewAxisOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
+    Vector2D   workspaceOverviewOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
     float      workspaceOverviewLogicalOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
+    Vector2D   workspaceOverviewLogicalVectorOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
     float      workspaceOverviewAlpha(size_t workspaceIdx) const;
     PHLWINDOW windowAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
     PHLWINDOW windowAtOverviewCursor(size_t* workspaceIdx = nullptr);
@@ -98,6 +187,19 @@ class CScrollOverview : public IOverview {
     PHLWORKSPACE workspaceAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
     PHLWORKSPACE workspaceAtOverviewDropPoint(const Vector2D& point, size_t* workspaceIdx = nullptr, const PHLWINDOW& draggedWindow = nullptr) const;
     PHLWORKSPACE workspaceAtOverviewCursor(size_t* workspaceIdx = nullptr) const;
+    CBox         canvasDesktopWindowBox(const PHLWINDOW& window) const;
+    PHLWINDOW    canvasDesktopWindowAtPoint(const Vector2D& point, CBox* renderedBox = nullptr, Vector2D* surfaceLocal = nullptr) const;
+    void         zoomCanvasAt(const Vector2D& point, float requestedZoom, bool animate = false);
+    bool         manageCanvasWindow(PHLWINDOW window, bool placeNew);
+    bool         followCanvasWindow(PHLWINDOW window, bool syncFocus, bool animate = true);
+    void         ensureCanvasKeyboardFocus(PHLWINDOW window = {});
+    void         seedCanvasWindows();
+    void         forwardCanvasPointerMotion(uint32_t timeMs = 0);
+    bool         forwardCanvasPointerButton(const IPointer::SButtonEvent& event);
+    bool         forwardCanvasPointerAxis(const IPointer::SAxisEvent& event);
+    Vector2D     canvasCellForWorkspaceIndex(size_t workspaceIdx) const;
+    Vector2D     canvasCellAtOverviewPoint(const Vector2D& point) const;
+    CBox         snapCanvasWindowBox(const CBox& box, PHLMONITOR monitor) const;
     Vector2D  overviewPointToGlobal(size_t workspaceIdx, const Vector2D& pointLocal) const;
     CBox      draggedWindowBox(size_t workspaceIdx) const;
     CBox      draggedWindowBoxFor(PHLWINDOW window, size_t workspaceIdx, const Vector2D& pointLocal, const Vector2D& grabRatio) const;
@@ -114,6 +216,8 @@ class CScrollOverview : public IOverview {
     void      updateScrollingPan();
     void      beginScrollingPan(PHLWORKSPACE workspace);
     void      endScrollingPan();
+    void      updateViewportWorkspaceFromCanvasCenter();
+    bool      commitCanvasViewport(size_t workspaceIdx);
     void      focusMostVisibleScrollingWindow(const PHLWORKSPACE& workspace);
     bool      moveScrollingColumnSelection(bool next);
     bool      moveScrollingStackSelection(bool next);
@@ -148,14 +252,18 @@ class CScrollOverview : public IOverview {
     static int realtimePreviewTimerCallback(void* data);
 
     size_t viewportCurrentWorkspace = 0;
+    std::string canvasPlacementFailure;
     bool   rebuildPending           = false;
     bool   overviewBlurDirty        = true;
     bool   backdropBlurDirty        = true;
     bool   overviewBlurStateValid   = false;
     float  lastOverviewBlurScale    = 1.F;
     int    lastBackdropWallpaperMode = -1;
+    float  lastBackdropBlurStrength = -1.F;
     Vector2D lastOverviewBlurViewOffset = Vector2D{};
     SP<Render::IFramebuffer> backdropBlurFB;
+    SP<Render::IFramebuffer> backdropSharpFB;
+    bool   backdropSharpDirty       = true;
 
     struct SWorkspaceImage {
         PHLWORKSPACE              pWorkspace;
@@ -260,9 +368,11 @@ class CScrollOverview : public IOverview {
     PHLWORKSPACE                     startedOn;
 
     PHLANIMVAR<float>                scale;
+    PHLANIMVAR<float>                transitionProgress;
     PHLANIMVAR<Vector2D>             viewOffset;
     PHLANIMVAR<float>                workspaceInsertProgress;
     PHLANIMVAR<float>                workspaceInsertFadeProgress;
+    SP<Hyprutils::Animation::SAnimationPropertyConfig> overviewAnimationConfig;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> workspaceInsertFadeConfig;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> workspaceRemoveFadeConfig;
     Time::steady_tp                  lastRealtimePreviewFrame = {};
@@ -271,12 +381,40 @@ class CScrollOverview : public IOverview {
 
     bool                             closing = false;
     bool                             closeApplied = false; // close() has run its teardown; guards against double-invocation
+    bool                             spacePanHeld = false;
+    bool                             canvasPinching = false;
+    bool                             canvasArrangeButtonPressed = false;
+    bool                             canvasNavigationActive = true;
+    bool                             landingDrag = false;
+    bool                             hasLandingDestination = false;
+    Vector2D                         landingDragLast{};
+    CBox                             landingDestinationWorld{};
+    float                            canvasPinchStartZoom = 1.F;
+    PHLWINDOWREF                     navigatorHoverWindow;
+    std::string                      canvasCursorShape;
+    std::unordered_set<uint32_t>     navigatorSwallowedButtons;
+    // After a keyboard jump the pointer is usually resting on some other
+    // window; hover focus waits until it actually enters a different one.
+    bool                             hoverFocusSettling   = false;
+    bool                             hoverFocusSettleSeen = false;
+    PHLWINDOWREF                     hoverFocusSettleWindow;
+    PHLWINDOWREF                     canvasForwardedPointerWindow;
+    WP<CWLSurfaceResource>           canvasForwardedPointerSurface;
+    std::unordered_set<uint32_t>     canvasForwardedPointerButtons;
+    uint32_t                         clientGestureButton = 0; // held button of a move/resize the app asked for
+    // Leftover high-resolution wheel units, in 1/120 of a notch.
+    int32_t                          canvasWheelValue120Accum = 0;
+    wl_pointer_axis                  canvasWheelAccumAxis    = WL_POINTER_AXIS_VERTICAL_SCROLL;
+    uint32_t                         canvasWheelAccumTimeMs  = 0;
 
     CHyprSignalListener             mouseMoveHook;
     CHyprSignalListener             mouseButtonHook;
     CHyprSignalListener             touchMoveHook;
     CHyprSignalListener             touchDownHook;
     CHyprSignalListener             mouseAxisHook;
+    CHyprSignalListener             pinchBeginHook;
+    CHyprSignalListener             pinchUpdateHook;
+    CHyprSignalListener             pinchEndHook;
     CHyprSignalListener             windowOpenHook;
     CHyprSignalListener             windowCloseHook;
     CHyprSignalListener             windowMoveHook;
@@ -298,3 +436,11 @@ class CScrollOverview : public IOverview {
 
     friend class CScrollOverviewPassElement;
 };
+
+// The shared canvas decouples a window's Hyprland owner from the output whose
+// camera the user is operating. Directional key dispatch must resolve through
+// this interaction camera before looking at ordinary window focus.
+SP<IOverview> canvasNavigationOverview();
+void          disarmCanvasSwitcher();
+void          disarmCanvasTimers();
+void          onCanvasExperimentChanged(std::string_view previous);
