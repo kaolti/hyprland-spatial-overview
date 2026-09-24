@@ -105,3 +105,30 @@ same view, zooming out and back changes nothing. *keys*
 For scripts, `hyprctl spatialoverview` prints the canvases' state as JSON:
 each screen's zoom and view, whether it is zoomed out, the windows that are
 fullscreen on a screen of their own, and the filled ones.
+
+## Planned: a canvas for each screen
+
+Linked screens make the screens one desk, so what the two show is always side
+by side on the canvas. A second mode will give each screen a canvas of its
+own, with one search across both.
+
+- **Two modes.** `canvas.screens = "desk"` (as now) or `"separate"`, and a key
+  (SUPER + CTRL + L) to flip between them live; windows stay where they are on
+  the screen when you flip.
+- **Each screen has its own canvas.** Every window belongs to one screen and is
+  drawn only there. Each screen has its own camera, zoom and places: SUPER +
+  1 … 0 act on the screen you are on.
+- **One search across both.** SUPER + CTRL + G searches every window. `Enter`
+  flies the camera of the screen that has the window to it and focuses it; the
+  other screen stays put. `SHIFT + Enter` brings the window over to the screen
+  you are on.
+- **Moving a window to the other screen's canvas:** drag it across the seam
+  and it lands on the other canvas where you drop it; a key does the same
+  without the mouse.
+- **New windows** open on the screen with the pointer.
+- **The minimap** on each screen shows that screen's canvas.
+- Fullscreen, fill, pin and the other rules above work as they do now, per
+  screen.
+
+The tests will cover both modes: the situations in *keys* run in each, and
+flipping between the modes must leave every window where it is on the screen.
