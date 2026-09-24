@@ -98,6 +98,10 @@ class CScrollOverview : public IOverview {
     std::optional<CBox> canvasScreenToWorld(const CBox& screenGlobal) const;
     bool                canvasDrawsWindow(const PHLWINDOW& window) const;
     bool                canvasPopupFading() const;
+    // X11 windows: where this canvas draws a window (global logical), and
+    // making this canvas the one an X11 window reports its position from.
+    CBox                canvasDrawnGlobalBox(const PHLWINDOW& window) const;
+    void                canvasClaimX11Window(const PHLWINDOW& window);
     // A client asked to be moved (or resized from an edge) by its own
     // title bar; run the canvas's drag with the button the app was pressed with.
     bool                beginClientWindowGesture(PHLWINDOW window, std::optional<Layout::eRectCorner> resizeEdge);

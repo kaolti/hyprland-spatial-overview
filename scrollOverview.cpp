@@ -48,6 +48,8 @@
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/desktop/view/Popup.hpp>
+#include <hyprland/src/xwayland/XSurface.hpp>
+#include <hyprland/src/managers/XWaylandManager.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/state/ViewState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
@@ -115,6 +117,7 @@ static bool            g_canvasMemoryStarted     = false;
 static Time::steady_tp g_canvasMemoryRestoreUntil = {};
 static wl_event_source* g_canvasMemoryTimer       = nullptr;
 extern void requestFlightDeckNative(PHLWINDOW window, Fullscreen::eFullscreenMode mode);
+void        canvasReleaseX11Windows();
 
 static SCanvasSavedWindow saveCanvasWindow(PHLWINDOW w) {
     return {w, w->m_workspace, w->layoutTarget()->position(), w->layoutTarget()->floating(), Fullscreen::controller()->getFullscreenModes(w)};
@@ -416,7 +419,18 @@ static bool shouldShowOverviewWindow(const PHLWINDOW& window) {
     if (WINDOW->m_pinned && WINDOW->m_isFloating)
         return false;
 
+    // X11 menus and tooltips belong to the screen, not the canvas.
+    if (WINDOW->m_isX11 && WINDOW->isX11OverrideRedirect())
+        return false;
+
     return true;
+}
+
+// X11 menus and tooltips (override-redirect windows): the app places them
+// itself, in screen coordinates, so they are drawn and hit fixed to the
+// screen rather than moved with the camera.
+static bool canvasScreenFixedWindow(const PHLWINDOW& window) {
+    return validMapped(window) && window->m_isX11 && window->isX11OverrideRedirect() && !window->isHidden();
 }
 
 static bool shouldShowPinnedFloatingOverviewWindow(const PHLWINDOW& window) {
@@ -1378,6 +1392,7 @@ CScrollOverview::~CScrollOverview() {
         // closing it normally later restores them as usual.
         if (!g_overviewMonitorTeardown)
             restoreCanvasNativeLayout();
+        canvasReleaseX11Windows();
         restoreActiveWorkspaceVisibility();
         Pointer::Cursor::overrideController->unsetOverride(Pointer::Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
     }
@@ -3420,6 +3435,8 @@ void CScrollOverview::refreshCanvasSettings() {
 
 CBox CScrollOverview::canvasDesktopWindowBox(const PHLWINDOW& window) const {
     const auto MONITOR = pMonitor.lock();
+    if (MONITOR && canvasScreenFixedWindow(window))
+        return getOverviewGlobalBox(window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT), MONITOR, 1.F, Vector2D{}, Vector2D{}, layout, false);
     if (!MONITOR || !shouldShowOverviewWindow(window))
         return {};
 
@@ -3445,6 +3462,153 @@ bool CScrollOverview::canvasDrawsWindow(const PHLWINDOW& window) const {
         return false;
     const auto BOX = canvasDesktopWindowBox(getOverviewWindowToShow(window));
     return !BOX.empty() && overviewBoxIntersectsMonitor(BOX, MONITOR);
+}
+
+// ---- X11 windows ------------------------------------------------------------------
+// An X11 app knows its window only by the position the X server holds, and
+// the X server delivers pointer input only inside its screen. A canvas
+// window's real position can be anywhere in the world, so each X11 window
+// reports where it is drawn instead: by the canvas the pointer last used it
+// on, else the one showing most of it. Clicks then land, and menus the app
+// places itself open next to it (see canvasScreenFixedWindow). Positions the
+// app asks for are translated back.
+struct SX11Sync {
+    PHLWINDOWREF  window;
+    PHLMONITORREF owner;
+    Vector2D      sent;   // X11 position last reported
+    Vector2D      offset; // reported minus real, in X11 coordinates
+    bool          valid = false;
+};
+static std::unordered_map<const Desktop::View::CWindow*, SX11Sync> g_x11Sync;
+
+static bool canvasManagesX11(const PHLWINDOW& window) {
+    return window && window->m_isX11 && !window->isX11OverrideRedirect() && window->m_xwaylandSurface && shouldShowOverviewWindow(window) && !window->m_pinned;
+}
+
+static SX11Sync* x11Sync(const PHLWINDOW& window, bool create) {
+    auto it = g_x11Sync.find(window.get());
+    if (it != g_x11Sync.end() && it->second.window.lock() != window) {
+        g_x11Sync.erase(it); // a new window at a reused address
+        it = g_x11Sync.end();
+    }
+    if (it == g_x11Sync.end()) {
+        if (!create)
+            return nullptr;
+        it = g_x11Sync.emplace(window.get(), SX11Sync{.window = window}).first;
+    }
+    return &it->second;
+}
+
+static std::optional<Vector2D> canvasX11DrawnPosition(const PHLWINDOW& window) {
+    const auto*      SYNC   = x11Sync(window, false);
+    const auto       OWNER  = SYNC ? SYNC->owner.lock() : nullptr;
+    CScrollOverview* chosen = nullptr;
+    double           best   = 0.0;
+    for (const auto& overview : scrollOverviews()) {
+        auto* canvas = canvasOf(overview);
+        if (!canvas)
+            continue;
+        const auto BOX = canvas->canvasDrawnGlobalBox(window);
+        if (BOX.empty())
+            continue;
+        if (OWNER && canvas->canvasMonitor() == OWNER) {
+            chosen = canvas;
+            break;
+        }
+        const auto VISIBLE = BOX.intersection(canvas->canvasMonitor()->logicalBox());
+        if (VISIBLE.width * VISIBLE.height > best) {
+            best   = VISIBLE.width * VISIBLE.height;
+            chosen = canvas;
+        }
+    }
+    if (!chosen)
+        return std::nullopt;
+    const auto POS = g_pXWaylandManager->waylandToXWaylandCoords(chosen->canvasDrawnGlobalBox(window).pos(), chosen->canvasMonitor());
+    return Vector2D{std::round(POS.x), std::round(POS.y)};
+}
+
+CBox CScrollOverview::canvasDrawnGlobalBox(const PHLWINDOW& window) const {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR || !isCanvasDesktop() || closing)
+        return {};
+    const auto BOX = canvasDesktopWindowBox(window);
+    if (BOX.empty())
+        return {};
+    const double SCALE = std::max(0.01, sc<double>(MONITOR->m_scale));
+    return CBox{MONITOR->m_position + BOX.pos() / SCALE, BOX.size() / SCALE};
+}
+
+void CScrollOverview::canvasClaimX11Window(const PHLWINDOW& window) {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR || !canvasManagesX11(window))
+        return;
+    auto* sync = x11Sync(window, true);
+    if (sync->owner.lock() == MONITOR)
+        return;
+    sync->owner = MONITOR;
+    window->sendWindowSize(true);
+}
+
+// Hyprland is about to tell an X11 window where it is (hooked).
+CBox canvasX11Configure(void* surface, const CBox& box) {
+    PHLWINDOW window;
+    for (const auto& w : Desktop::windowState()->windows()) {
+        if (w && w->m_isX11 && w->m_xwaylandSurface.get() == surface) {
+            window = w;
+            break;
+        }
+    }
+    if (!canvasManagesX11(window))
+        return box;
+    const auto DRAWN = canvasX11DrawnPosition(window);
+    if (!DRAWN) {
+        if (auto* sync = x11Sync(window, false))
+            sync->valid = false;
+        return box;
+    }
+    auto* sync   = x11Sync(window, true);
+    sync->sent   = *DRAWN;
+    sync->offset = *DRAWN - box.pos();
+    sync->valid  = true;
+    return CBox{*DRAWN, box.size()};
+}
+
+// An X11 app asks to be put somewhere, in the coordinates it was given (hooked).
+CBox canvasX11Request(void* windowPtr, CBox box) {
+    const auto* WINDOW = sc<Desktop::View::CWindow*>(windowPtr);
+    const auto  IT     = WINDOW ? g_x11Sync.find(WINDOW) : g_x11Sync.end();
+    if (IT == g_x11Sync.end() || !IT->second.valid || IT->second.window.lock().get() != WINDOW)
+        return box;
+    box.x -= IT->second.offset.x;
+    box.y -= IT->second.offset.y;
+    return box;
+}
+
+// After the camera moves, X11 windows are told where they now are.
+static void canvasResyncX11Windows() {
+    for (const auto& window : Desktop::windowState()->windows()) {
+        if (!canvasManagesX11(window))
+            continue;
+        const auto DRAWN = canvasX11DrawnPosition(window);
+        if (!DRAWN)
+            continue;
+        const auto* SYNC = x11Sync(window, false);
+        if (SYNC && SYNC->valid && SYNC->sent.distanceSq(*DRAWN) < 0.25)
+            continue;
+        window->sendWindowSize(true);
+    }
+}
+
+// With the canvas gone, X11 windows report their real positions again.
+void canvasReleaseX11Windows() {
+    std::vector<PHLWINDOW> windows;
+    for (const auto& [_, sync] : g_x11Sync) {
+        if (const auto WINDOW = sync.window.lock(); validMapped(WINDOW))
+            windows.push_back(WINDOW);
+    }
+    g_x11Sync.clear();
+    for (const auto& window : windows)
+        window->sendWindowSize(true);
 }
 
 // Where a canvas window's popups must stay: the screen as the canvas that
@@ -3510,6 +3674,21 @@ PHLWINDOW CScrollOverview::canvasDesktopWindowAtPoint(const Vector2D& point, CBo
 
     const float FACTOR  = std::max(0.01F, scale->value() * MONITOR->m_scale);
     const auto& WINDOWS = Desktop::windowState()->windows();
+
+    // X11 menus and tooltips first: they are on top, at their screen spot.
+    for (auto it = WINDOWS.rbegin(); it != WINDOWS.rend(); ++it) {
+        const auto& WINDOW = *it;
+        if (!canvasScreenFixedWindow(WINDOW))
+            continue;
+        const auto BOX = canvasDesktopWindowBox(WINDOW);
+        if (!BOX.containsPoint(point))
+            continue;
+        if (renderedBox)
+            *renderedBox = BOX;
+        if (surfaceLocal)
+            *surfaceLocal = (point - BOX.pos()) * (1.F / std::max(0.01F, sc<float>(MONITOR->m_scale)));
+        return WINDOW;
+    }
 
     // Popups first: menus hang outside their window, drawn above everything,
     // and must get the pointer there too. Hyprland's hit tester then picks
@@ -4008,9 +4187,14 @@ void CScrollOverview::forwardCanvasPointerMotion(uint32_t timeMs) {
     else if (WINDOW) {
         BOX = canvasDesktopWindowBox(WINDOW);
         const auto MONITOR = pMonitor.lock();
-        const float FACTOR = MONITOR ? std::max(0.01F, scale->value() * MONITOR->m_scale) : 1.F;
+        const float FACTOR = MONITOR ? std::max(0.01F, (canvasScreenFixedWindow(WINDOW) ? 1.F : scale->value()) * MONITOR->m_scale) : 1.F;
         WINDOWLOCAL        = (lastMousePosLocal - BOX.pos()) * (1.F / FACTOR);
     }
+
+    // The X server has to agree about where this window is on the monitor
+    // the pointer is using it on.
+    if (WINDOW && WINDOW->m_isX11)
+        canvasClaimX11Window(WINDOW);
 
     if (WINDOW && WINDOW->wlSurface() && WINDOW->wlSurface()->resource()) {
         const auto WORLDPOINT = WINDOW->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT).pos() + WINDOWLOCAL;
@@ -6737,6 +6921,14 @@ void CScrollOverview::renderCanvasDesktopScene(PHLMONITOR monitor, float renderS
 
     renderPass(false);
     renderPass(true);
+
+    for (const auto& window : Desktop::windowState()->windows()) {
+        if (!canvasScreenFixedWindow(window))
+            continue;
+        const auto BOX = canvasDesktopWindowBox(window);
+        if (overviewBoxIntersectsMonitor(BOX, monitor))
+            renderWindowLive(monitor, window, BOX, 1.F, now);
+    }
 }
 
 void CScrollOverview::renderChromeLayers(PHLMONITOR monitor, const Time::steady_tp& now) {
@@ -7305,6 +7497,11 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
 
     if (sentThrottledWindowFrame)
         lastRealtimePreviewFrame = now;
+
+    for (const auto& window : Desktop::windowState()->windows()) {
+        if (canvasScreenFixedWindow(window) && overviewBoxIntersectsMonitor(canvasDesktopWindowBox(window), MONITOR))
+            surfaceTreePresent(window->wlSurface() ? window->wlSurface()->resource() : nullptr, MONITOR, now);
+    }
 
     realtimePreviewFrameQueued = false;
 
@@ -7915,6 +8112,7 @@ void CScrollOverview::render() {
         sendOverviewFrameCallbacks(NOW);
         if (canvasPopupFading())
             schedulePopupFadeFrame();
+        canvasResyncX11Windows();
         return;
     }
 

@@ -43,7 +43,13 @@ FORCE:
 VPOINTER = .build/vpointer
 VPOINTER_PROTOCOL = tests/tools/wlr-virtual-pointer-unstable-v1.xml
 
-test-tools: $(VPOINTER)
+X11MENU = .build/x11-menu
+
+test-tools: $(VPOINTER) $(X11MENU)
+
+$(X11MENU): tests/tools/x11-menu.c
+	@mkdir -p .build
+	$(CC) -O2 $< -lX11 -o $@
 
 $(VPOINTER): tests/tools/vpointer.c $(VPOINTER_PROTOCOL)
 	@mkdir -p .build/vpointer-gen

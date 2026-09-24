@@ -45,12 +45,17 @@ static CFunctionHook* g_pScrollDrawTexHook         = nullptr;
 static CFunctionHook* g_pScrollElementDrawTexHook  = nullptr;
 static CFunctionHook* g_pPopupRepositionHook       = nullptr;
 static CFunctionHook* g_pBeginDragTargetHook       = nullptr;
+static CFunctionHook* g_pX11ConfigureHook          = nullptr;
+static CFunctionHook* g_pX11ConfigureRequestHook   = nullptr;
 
 namespace Desktop::View {
     class CPopup;
 }
 bool canvasRepositionPopup(Desktop::View::CPopup* popup);
 bool canvasTakeClientWindowGesture(const PHLWINDOW& window, std::optional<Layout::eRectCorner> resizeEdge);
+CBox canvasX11Configure(void* surface, const CBox& box);
+CBox canvasX11Request(void* window, CBox box);
+void canvasReleaseX11Windows();
 typedef void (*origRenderWorkspace)(void*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&, const CBox&);
 typedef void (*origAddDamageA)(void*, const CBox&);
 typedef void (*origAddDamageB)(void*, const pixman_region32_t*);
@@ -90,6 +95,8 @@ bool ensureScrollOverviewHooks() {
     success      = success && g_pScrollElementDrawTexHook->hook();
     success      = success && g_pPopupRepositionHook->hook();
     success      = success && g_pBeginDragTargetHook->hook();
+    success      = success && g_pX11ConfigureHook->hook();
+    success      = success && g_pX11ConfigureRequestHook->hook();
 
     if (!success) {
         disableScrollOverviewHooks();
@@ -102,6 +109,10 @@ bool ensureScrollOverviewHooks() {
 }
 
 void disableScrollOverviewHooks() {
+    if (g_pX11ConfigureRequestHook)
+        g_pX11ConfigureRequestHook->unhook();
+    if (g_pX11ConfigureHook)
+        g_pX11ConfigureHook->unhook();
     if (g_pBeginDragTargetHook)
         g_pBeginDragTargetHook->unhook();
     if (g_pPopupRepositionHook)
@@ -294,6 +305,17 @@ static void hkBeginDragTarget(void* thisptr, SP<Layout::ITarget> target, eMouseB
             return;
     }
     rc<origBeginDragTarget>(g_pBeginDragTargetHook->m_original)(thisptr, target, mode, edge, exclusiveGrab);
+}
+
+// X11 windows report where the canvas draws them; see canvasX11Configure.
+typedef void (*origX11Configure)(void*, const CBox&);
+static void hkX11Configure(void* thisptr, const CBox& box) {
+    rc<origX11Configure>(g_pX11ConfigureHook->m_original)(thisptr, canvasX11Configure(thisptr, box));
+}
+
+typedef void (*origX11ConfigureRequest)(void*, CBox);
+static void hkX11ConfigureRequest(void* thisptr, CBox box) {
+    rc<origX11ConfigureRequest>(g_pX11ConfigureRequestHook->m_original)(thisptr, canvasX11Request(thisptr, box));
 }
 
 typedef void (*origPopupReposition)(void*);
@@ -795,6 +817,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                                                              findFnOrThrow("beginDragTarget", {"CLayoutManager::beginDragTarget("}),
                                                              rc<void*>(hkBeginDragTarget));
 
+    g_pX11ConfigureHook = HyprlandAPI::createFunctionHook(SCROLLOVERVIEW_HANDLE, findFnOrThrow("configure", {"CXWaylandSurface::configure("}),
+                                                          rc<void*>(hkX11Configure));
+    g_pX11ConfigureRequestHook = HyprlandAPI::createFunctionHook(SCROLLOVERVIEW_HANDLE, findFnOrThrow("onX11ConfigureRequest", {"CWindow::onX11ConfigureRequest("}),
+                                                                 rc<void*>(hkX11ConfigureRequest));
+
     // Popups of canvas windows are kept on screen as the canvas shows them.
     g_pPopupRepositionHook = HyprlandAPI::createFunctionHook(SCROLLOVERVIEW_HANDLE, findFnOrThrow("reposition", {"Desktop::View::CPopup::reposition()"}),
                                                              rc<void*>(hkPopupReposition));
@@ -847,6 +874,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_unloading = true;
     clearScrollOverviews();
     disableScrollOverviewHooks();
+    canvasReleaseX11Windows();
 
     disarmCanvasTimers();
     SpatialOverview::Navigator::shutdown();
