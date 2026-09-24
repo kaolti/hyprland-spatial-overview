@@ -355,6 +355,8 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CBoolValue>("plugin:spatialoverview:canvas:linked_screens", "screens show adjacent parts of the canvas and move together, like one wide desk", true));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CBoolValue>("plugin:spatialoverview:canvas:places", "workspace keys go to places on the canvas (experimental); off, they do nothing on the canvas", false));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CFloatValue>("plugin:spatialoverview:canvas:initial_zoom", "initial shared-canvas camera zoom", 0.72F,
                                                           SFloatValueOptions{.min = 0.1F, .max = 2.F}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
@@ -644,6 +646,10 @@ bool getCanvasEnabled() {
 
 bool getCanvasDesktopMode() {
     return getValue<bool>("plugin:spatialoverview:canvas:desktop_mode");
+}
+
+bool getCanvasPlaces() {
+    return getValue<bool>("plugin:spatialoverview:canvas:places");
 }
 
 bool getCanvasLinkedScreens() {

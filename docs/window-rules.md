@@ -81,11 +81,14 @@ them (`tests/*-nested.py`; most take `NESTED_SCALE=1.25` for scaled screens).
 
 ## Places (the workspace keys)
 
+Experimental and off by default (`canvas.places = true` turns them on); off,
+the workspace keys do nothing on the canvas.
+
 - SUPER + 1 … 0 go to a place on the canvas; SHIFT + SUPER + N takes the focused
   window there (same spot on the screen) and follows it; SHIFT + ALT + SUPER + N
   sends it without following. SUPER + TAB, SHIFT + SUPER + TAB and SUPER +
-  scroll step through the places that have windows; CTRL + SUPER + TAB goes back
-  to the place before.
+  scroll go to the place next door, empty or not; CTRL + SUPER + TAB goes back
+  to the place you came from.
 - A place is a view of all screens at 100%. At first they are a row, one
   screen-set apart, with the place numbered after the workspace you were on
   where you are; each remembers where you left its camera and the window that

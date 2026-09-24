@@ -212,7 +212,7 @@ if hl.plugin.spatialoverview.tuning_file then
 end
 
 -- The canvas. The first press of a session creates it and zooms out.
-bind("SUPER + CTRL + G", "Canvas", function()
+bind("SUPER + CTRL + G", "Zoom out and search", function()
   hl.plugin.spatialoverview.overview("toggle all")
 end)
 
@@ -295,8 +295,8 @@ end
 -- Workspaces are places on the canvas: SUPER + 1…0 go to a place, SHIFT +
 -- SUPER + N sends the focused window there and follows it, SHIFT + ALT +
 -- SUPER + N sends it without following, SUPER + TAB / SHIFT + SUPER + TAB (and
--- SUPER + scroll) step through the places that have windows, CTRL + SUPER +
--- TAB goes back to the one before. Without the canvas they are workspaces.
+-- SUPER + scroll) go to the place next door, CTRL + SUPER + TAB goes back
+-- to the one you came from. Without the canvas they are workspaces.
 for place = 1, 10 do
   local key = "code:" .. tostring(place + 9)
   local ws = tostring(place)

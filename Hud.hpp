@@ -39,6 +39,7 @@ namespace SpatialOverview::Hud {
         bool        uppercase = true, corners = true;
         double      querySize = 17.0, titleSize = 14.0, detailSize = 10.5, cornerSize = 12.0, labelSize = 10.5;
         double      searchBorder = 1.5, searchGlow = 0.3;
+        double      panelPad = 10.0, panelShadow = 1.0, panelShadowSize = 30.0; // the palette's container
         CHyprColor  searchEdge; // border and glow color; alpha is the border opacity
         std::string signature;  // all of the above, for texture cache keys
     };

@@ -21,8 +21,6 @@ by yayuuu (see [Credits](#credits)).
 - **Your screens are one desk.** Side by side on the canvas as they stand on
   your desk, moving together: a window can sit across the seam, and dragging
   it from one screen to the other is one continuous move.
-- **Places instead of workspaces.** `SUPER + 1` … `0` go to places on the
-  canvas, `SHIFT + SUPER + 1` … `0` take the focused window along.
 - **Type to find.** `SUPER + CTRL + G` zooms out with a search bar already
   listening. Type part of a title or app name and the camera glides to the
   best match; `Enter` lands on it at full size, `Esc` takes you back.
@@ -98,9 +96,7 @@ them too.
 | `SUPER + T`, `SUPER + ALT + F` | Make the focused window fill its screen, with the usual gaps; again puts it back. |
 | `SUPER + F`, or an app going fullscreen | Fullscreen on the screen the window is on; the other screens keep the canvas. `SUPER + CTRL + G` takes the screen back, going back to the window makes it fullscreen again. |
 | `SUPER + O` | Pin the window to the screen: it stays put while the canvas moves; again puts it back on the canvas. |
-| `SUPER + 1` … `0` | Go to that place on the canvas (zoomed out: the view glides there; at 100% the minimap shows on the way). |
-| `SHIFT + SUPER + 1` … `0` | Take the focused window to that place (`SHIFT + ALT + SUPER`: send it without following). |
-| `SUPER + TAB`, `SHIFT + SUPER + TAB`, `SUPER` + scroll | The next, previous place with windows; `CTRL + SUPER + TAB` the place before. |
+| `SUPER + 1` … `0`, `SUPER + TAB` and the other workspace keys | Nothing, on the canvas (with `canvas.places`, experimental: places on the canvas). |
 | `SUPER + J`, `P`, `L`, `Home`, `G`, `SHIFT + ALT + SUPER` + arrows | Tiling and grouping keys: nothing, on the canvas (every window floats). |
 | Middle-drag | Pan the canvas. |
 | `CTRL` + wheel, pinch | Zoom. |
@@ -149,6 +145,7 @@ Everything can also be set in `~/.config/hypr/spatialoverview.lua` (then
 | --- | --- |
 | `canvas.desktop_mode` | Enable the shared infinite-window desktop |
 | `canvas.linked_screens` | Screens show adjacent parts of the canvas and move together (default); off: each screen is its own camera |
+| `canvas.places` | Experimental, off by default: the workspace keys go to places on the canvas and take windows there |
 | `canvas.initial_zoom` | Camera zoom when desktop mode opens |
 | `canvas.min_zoom` / `max_zoom` | Continuous camera zoom limits |
 | `canvas.zoom_step` | Ctrl-wheel zoom strength |

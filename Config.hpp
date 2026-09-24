@@ -112,6 +112,7 @@ bool          getCanvasEnabled();
 bool          getCanvasDesktopMode();
 bool          getCanvasPersistent();
 bool          getCanvasLinkedScreens();
+bool          getCanvasPlaces();
 float         getCanvasInitialZoom();
 float         getCanvasMinZoom();
 float         getCanvasMaxZoom();

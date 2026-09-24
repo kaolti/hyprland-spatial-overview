@@ -4,7 +4,7 @@ canvas("go next|prev|back"), on two linked screens.
   there is out of view; going back returns exactly;
 - sending the focused window to a place and following it keeps it at the same
   spot on the screen; "stay" sends it away and the view does not move;
-- next and previous step over empty places.
+- next and previous go to the place next door, empty or not.
 
 usage: tests/places-nested.py [PLUGIN.so]   (default .build/dev/spatialoverview.so)
 Set NESTED_SCALE=1.25 to test scaled outputs.
@@ -23,7 +23,7 @@ LW, LH = round(1280 / SCALE), round(720 / SCALE)
 tmp = tempfile.mkdtemp(prefix="places-")
 fifo = os.path.join(tmp, "game.in")
 os.mkfifo(fifo)
-n = nav.Nested(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, ".build/dev/spatialoverview.so"), os.path.join(ROOT, ".build/shots-places"),
+n = nav.Nested(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, ".build/dev/spatialoverview.so"), os.path.join(ROOT, ".build/shots-places"), extra=",places=true",
                extra_lua='\nhl.config({xwayland={force_zero_scaling=true}})\n'
                          f'hl.monitor({{ output = "WAYLAND-1", mode = "1280x720@60", position = "0x0", scale = {SCALE} }})\n'
                          f'hl.monitor({{ output = "SECOND", mode = "1280x720@60", position = "{LW}x0", scale = {SCALE} }})\n')
@@ -148,11 +148,12 @@ try:
     others_before = {k: v for k, v in b0.items() if k != "x11-game"}
     check({k: v for k, v in boxes().items() if k != "x11-game"} == others_before, "no other window moved")
 
-    # -- next / prev step over the empty places
+    # -- next / prev: the place next door, empty or not
+    stride = (v1[0] - v0[0]) / (other - here)
     canvas("go prev")
-    check(view() == v0, f"go prev from {other}: back to place {here}, the nearest with windows ({view()})")
+    check(abs(view()[0] - (v1[0] - stride)) <= 2 and view()[1] == v1[1], f"go prev from {other}: place {other - 1}, next door ({view()})")
     canvas("go next")
-    check(view() == v1, f"go next: on to place {other}, skipping the empty ones ({view()})")
+    check(view() == v1, f"go next: back to place {other} ({view()})")
 
     # -- send it away without following
     canvas(f"send 3 stay" if other != 3 and here != 3 else "send 4 stay")

@@ -10880,18 +10880,14 @@ static Vector2D placeCamera(int place) {
     return g_placeAnchorCamera + Vector2D{(place - g_placeAnchor) * canvasScreensBox().width * 1.5, 0.0};
 }
 
-// Whether any window is in a place's view (its middle on the screens there).
-static bool placeHasWindows(int place) {
-    const auto VIEW = canvasScreensBox().translate(placeCamera(place));
-    return std::ranges::any_of(Desktop::windowState()->windows(), [&VIEW](const auto& window) {
-        return shouldShowOverviewWindow(window) && !window->m_pinned && VIEW.containsPoint(window->m_realPosition->goal() + window->m_realSize->goal() / 2.0);
-    });
-}
-
 bool CScrollOverview::canvasPlaceAction(const std::string& action) {
     const auto MONITOR = pMonitor.lock();
     if (!MONITOR || !isCanvasDesktop() || closing)
         return false;
+    // Places are off unless canvas:places is set: the workspace keys then do
+    // nothing on the canvas (and succeed, so bindings skip their fallback).
+    if (!ScrollOverview::Config::getCanvasPlaces())
+        return true;
     // You are at the place of the workspace you were on.
     if (g_place == 0) {
         const auto ID      = MONITOR->m_activeWorkspace ? MONITOR->m_activeWorkspace->m_id : 1;
@@ -10933,15 +10929,10 @@ bool CScrollOverview::canvasPlaceAction(const std::string& action) {
         const auto WHERE = action.substr(3);
         if (WHERE == "back")
             return go(g_previousPlace ? g_previousPlace : g_place);
-        if (WHERE == "next" || WHERE == "prev") {
-            const int STEP = WHERE == "next" ? 1 : -1;
-            for (int i = 1; i <= 10; ++i) {
-                const int PLACE = ((g_place - 1 + STEP * i) % 10 + 10) % 10 + 1;
-                if (placeHasWindows(PLACE))
-                    return go(PLACE);
-            }
-            return true;
-        }
+        // The place next door, empty or not, like the workspace keys: with
+        // all your windows at one place there is still somewhere to go.
+        if (WHERE == "next" || WHERE == "prev")
+            return go(((g_place - 1 + (WHERE == "next" ? 1 : -1)) % 10 + 10) % 10 + 1);
         int place = 0;
         try { place = std::stoi(WHERE); } catch (...) { return false; }
         return go(place);

@@ -141,13 +141,13 @@ namespace SpatialOverview::Hud {
 
         // A soft drop shadow from layered strokes, to lift the container off
         // the canvas without a blur pass.
-        void shadow(cairo_t* cr, double x, double y, double w, double h, double r, double spread) {
+        void shadow(cairo_t* cr, double x, double y, double w, double h, double r, double spread, double strength = 1.0, double drop = 0.25) {
             constexpr int LAYERS = 10;
             for (int i = LAYERS; i >= 1; --i) {
                 const double T = sc<double>(i) / LAYERS;
                 const double E = spread * T;
-                roundedRect(cr, x - E, y - E + spread * 0.25, w + E * 2.0, h + E * 2.0, r + E);
-                cairo_set_source_rgba(cr, 0, 0, 0, 0.16 * std::pow(1.0 - T, 1.6));
+                roundedRect(cr, x - E, y - E + spread * drop, w + E * 2.0, h + E * 2.0, r + E);
+                cairo_set_source_rgba(cr, 0, 0, 0, std::min(1.0, 0.16 * strength * std::pow(1.0 - T, 1.6)));
                 cairo_set_line_width(cr, spread / LAYERS * 2.2);
                 cairo_stroke(cr);
             }
@@ -369,12 +369,14 @@ namespace SpatialOverview::Hud {
         };
 
         const std::vector<SHelpSection>& helpLeft() {
-            static const std::vector<SHelpSection> SECTIONS{
-                {"Find", {{"Type", "Search"}, {"↑ ↓", "Move in results"}, {"⇥ ⇧⇥", "Next / prev"}, {"⌃1-9", "Jump to result"}, {"↵", "Go to window"},
-                          {"⇧↵", "Bring it here"}, {"Esc", "Clear, then back"}}},
-                {"Mouse", {{"Click", "Go to window"}, {"Drag", "Move or pan"}, {"Wheel", "Zoom"}, {"Minimap", "Jump"}}},
-            };
-            return SECTIONS;
+            static const SHelpSection FIND{"Find", {{"Type", "Search"}, {"↑ ↓", "Move in results"}, {"⇥ ⇧⇥", "Next / prev"}, {"⌃1-9", "Jump to result"},
+                                                   {"↵", "Go to window"}, {"⇧↵", "Bring it here"}, {"Esc", "Clear, then back"}}};
+            static const SHelpSection PLACES{"Places", {{"Super 1-0", "Go to a place"}, {"Super ⇥ ⇧⇥", "Next / prev place"},
+                                                       {"Super ⇧ 1-0", "Take window along"}, {"Super ⇧ Alt 1-0", "Send window there"}}};
+            static const SHelpSection MOUSE{"Mouse", {{"Click", "Go to window"}, {"Drag", "Move or pan"}, {"Wheel", "Zoom"}, {"Minimap", "Jump"}}};
+            static const std::vector<SHelpSection> WITHPLACES{FIND, PLACES, MOUSE};
+            static const std::vector<SHelpSection> WITHOUT{FIND, MOUSE};
+            return ScrollOverview::Config::getCanvasPlaces() ? WITHPLACES : WITHOUT;
         }
 
         const std::vector<SHelpSection>& helpRight() {
@@ -432,9 +434,13 @@ namespace SpatialOverview::Hud {
             COLUMN(helpRight(), x + w / 2.0 + 8.0 * s, w / 2.0 - 30.0 * s);
         }
 
-        constexpr double PAD    = 10.0; // container padding
         constexpr double GAP    = 6.0;  // between cards
-        constexpr double MORE_H = 22.0;
+
+        // A footer line under the rows ("+3 more", the tuner's description):
+        // one row gap above its text, nothing below it but the padding.
+        double footerHeight(const STheme& theme) {
+            return GAP + std::ceil(theme.detailSize * 1.3);
+        }
         constexpr double TUNER_ROW_H = 40.0;
 
         std::string paletteKey(const SPaletteView& view, const Navigator::SState& state) {
@@ -654,6 +660,9 @@ namespace SpatialOverview::Hud {
         theme.labelSize  = number("navigator:label_size");
         theme.searchBorder = number("navigator:search_border");
         theme.searchGlow   = number("navigator:search_glow");
+        theme.panelPad        = number("navigator:panel_padding");
+        theme.panelShadow     = number("navigator:panel_shadow");
+        theme.panelShadowSize = number("navigator:panel_shadow_size");
         // Lower panel opacity turns the whole palette to glass, rows included.
         const float PANELALPHA = sc<float>(number("navigator:panel_opacity"));
         theme.panel.a          = PANELALPHA;
@@ -666,7 +675,8 @@ namespace SpatialOverview::Hud {
         theme.signature = std::format("{}{}{}|{}|{:.3f}|{:.1f}|{:.4f}|{}|{:.1f}|{:.1f}|{:.1f}|{:.2f}|{}{}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{}{:.2f}",
                                       hex(theme.accent), hex(theme.card), hex(theme.searchEdge), theme.font, theme.hudScale, theme.width, theme.top, theme.rows,
                                       theme.rowH, theme.searchH, theme.rounding, theme.tracking, theme.uppercase, theme.corners, theme.querySize, theme.titleSize,
-                                      theme.detailSize, theme.cornerSize, theme.labelSize, theme.searchBorder, theme.searchGlow, PANELALPHA, theme.searchEdge.a);
+                                      theme.detailSize, theme.cornerSize, theme.labelSize, theme.searchBorder, theme.searchGlow, PANELALPHA, theme.searchEdge.a) +
+            std::format("|{:.1f}|{:.2f}|{:.1f}", theme.panelPad, theme.panelShadow, theme.panelShadowSize);
         g_theme = theme;
     }
 
@@ -694,9 +704,11 @@ namespace SpatialOverview::Hud {
         }
 
         const double s       = view.scale * THEME.hudScale;
-        const double M       = 36.0 * s; // room for the shadow and glow
+        const double PAD     = THEME.panelPad;
+        const double M       = std::max(36.0, THEME.panelShadowSize + 6.0) * s; // room for the shadow and glow
         const double W       = std::min(THEME.width * s, view.monitorSize.x * view.scale * 0.94);
         const double INNERW  = W - PAD * 2.0 * s;
+        const double FOOTH   = footerHeight(THEME) * s;
         const double R       = THEME.rounding * s;
         const bool   TUNER   = STATE.tuner;
         const bool   LIST    = !TUNER && Navigator::listVisible() && !STATE.helpOpen;
@@ -713,7 +725,7 @@ namespace SpatialOverview::Hud {
 
         double innerH = SEARCHH;
         if (LIST || TUNER)
-            innerH += GAP * s + ROWS * ROWH + (ROWS - 1) * GAP * s + (FOOTER ? MORE_H * s : 0.0);
+            innerH += GAP * s + ROWS * ROWH + (ROWS - 1) * GAP * s + (FOOTER ? FOOTH : 0.0);
         if (HELP)
             innerH += GAP * s + HELPH;
         const double CONTAINERH = innerH + PAD * 2.0 * s;
@@ -729,7 +741,8 @@ namespace SpatialOverview::Hud {
 
         // The container: dark glass lifted by a soft shadow.
         if (THEME.panel.a > 0.001F) {
-            shadow(cr, M, M, W, CONTAINERH, R + 7.0 * s, 30.0 * s);
+            // Even on every side, so the padding reads the same all round.
+            shadow(cr, M, M, W, CONTAINERH, R + 7.0 * s, THEME.panelShadowSize * s, THEME.panelShadow, 0.0);
             roundedRect(cr, M, M, W, CONTAINERH, R + 7.0 * s);
             cairo_pattern_t* fill = cairo_pattern_create_linear(0, M, 0, M + CONTAINERH);
             const auto       TOP  = mix(THEME.panel, CHyprColor{1, 1, 1, THEME.panel.a}, 0.035F);
@@ -772,8 +785,8 @@ namespace SpatialOverview::Hud {
             std::string      about = ui(std::format("{} of {}", COUNT == 0 ? 0 : STATE.tunerSelected + 1, COUNT));
             if (COUNT > 0)
                 about += "  //  " + ui(Tuning::params()[STATE.tunerResults[STATE.tunerSelected]].description);
-            drawText(cr, FOOT, about, X + 14.0 * s, y + MORE_H * s / 2.0 + 2.0 * s, THEME.textDim, INNERW - 28.0 * s);
-            y += MORE_H * s;
+            drawText(cr, FOOT, about, X + 14.0 * s, y + GAP * s + (FOOTH - GAP * s) / 2.0, THEME.textDim, INNERW - 28.0 * s);
+            y += FOOTH;
         }
 
         if (LIST) {
@@ -850,9 +863,9 @@ namespace SpatialOverview::Hud {
 
             if (MORE) {
                 const STextStyle MORESTYLE{.px = THEME.detailSize * s, .weight = PANGO_WEIGHT_NORMAL, .spacing = 1.6 * s};
-                drawText(cr, MORESTYLE, ui(std::format("+{} more  //  keep typing or ↓", COUNT - OFFSET - ROWS)), X + 14.0 * s, y + MORE_H * s / 2.0 + 2.0 * s,
+                drawText(cr, MORESTYLE, ui(std::format("+{} more  //  keep typing or ↓", COUNT - OFFSET - ROWS)), X + 14.0 * s, y + GAP * s + (FOOTH - GAP * s) / 2.0,
                          THEME.textFaint);
-                y += MORE_H * s;
+                y += FOOTH;
             }
         }
 
@@ -882,7 +895,7 @@ namespace SpatialOverview::Hud {
     double selectionFocusY(const Vector2D& monitorSize) {
         const auto&  THEME  = theme();
         const double TOP    = monitorSize.y * THEME.top;
-        const double BOTTOM = TOP + (PAD * 2.0 + THEME.searchH + GAP + THEME.rows * THEME.rowH + (THEME.rows - 1) * GAP + MORE_H) * THEME.hudScale;
+        const double BOTTOM = TOP + (THEME.panelPad * 2.0 + THEME.searchH + GAP + THEME.rows * THEME.rowH + (THEME.rows - 1) * GAP + footerHeight(THEME)) * THEME.hudScale;
         return std::clamp((BOTTOM + monitorSize.y) / 2.0, monitorSize.y / 2.0, monitorSize.y * 0.66);
     }
 
@@ -928,7 +941,7 @@ namespace SpatialOverview::Hud {
         };
         std::vector<SBlock> blocks(3);
 
-        blocks[0].lines.push_back({ui("Spatial  //  Canvas"), THEME.textDim});
+        blocks[0].lines.push_back({ui("Phantomat  //  Canvas"), THEME.textDim});
         if (!view.experiment.empty())
             blocks[0].lines.push_back({ui("[ Exp  //  ") + caseMarkup(view.experiment) + " ]", THEME.accent});
 
