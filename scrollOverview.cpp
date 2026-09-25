@@ -1828,13 +1828,20 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
                 return;
             }
 
-            if (event.button != SECONDARY && !WINDOWGESTURE && !navigatorOwnsPointer() &&
+            const bool IS_MIDDLE      = (event.button == SECONDARY);
+            const bool GESTURE_ACTIVE = IS_MIDDLE ? (MODS & HL_MODIFIER_META) : WINDOWGESTURE;
+            if (!GESTURE_ACTIVE && !navigatorOwnsPointer() &&
                 (event.state == WL_POINTER_BUTTON_STATE_PRESSED || canvasForwardedPointerButtons.contains(event.button))) {
                 info.cancelled = forwardCanvasPointerButton(event);
                 if (info.cancelled)
                     return;
             }
         }
+
+        const uint32_t SECONDARY_BUTTON = BTN_MIDDLE;
+        const auto     ALL_MODS         = g_pInputManager ? g_pInputManager->getModsFromAllKBs() : 0;
+        if (event.button == SECONDARY_BUTTON && !(ALL_MODS & HL_MODIFIER_META) && !scrollingPanPointerDown)
+            return;
 
         if (event.state == WL_POINTER_BUTTON_STATE_PRESSED)
             g_pointerGrabOverview = this;
@@ -1961,6 +1968,9 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             lastMousePosLocal = getOverviewMousePosLocal(pMonitor.lock());
 
             if (event.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+                if (!(ALL_MODS & HL_MODIFIER_META))
+                    return;
+
                 if (beginSubmapMouseClickPending(event.button))
                     return;
 
@@ -2047,6 +2057,9 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         lastMousePosLocal = getOverviewMousePosLocal(pMonitor.lock());
 
         if (event.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+            if (!(ALL_MODS & HL_MODIFIER_META))
+                return;
+
             if (beginSubmapMouseClickPending(event.button))
                 return;
 
