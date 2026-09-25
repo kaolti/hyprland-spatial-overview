@@ -65,10 +65,14 @@ fi
 
 say "Building Phantomat for Hyprland $headers"
 make -C "$project_dir" -j"$(nproc)" all
-mkdir -p "$data_dir"
+make -C "$project_dir" --no-print-directory -s safe-unload
+mkdir -p "$data_dir" "${XDG_BIN_HOME:-$HOME/.local/bin}"
 install -m 0755 "$project_dir/spatialoverview.so" "$plugin.next"
 mv -f "$plugin.next" "$plugin"
 say "Installed $plugin"
+install -m 0755 "$project_dir/.build/safe-unload.so" "$data_dir/safe-unload.so"
+install -m 0755 "$project_dir/scripts/omarchy-phantomat-toggle.sh" "${XDG_BIN_HOME:-$HOME/.local/bin}/omarchy-phantomat-toggle"
+say "Installed omarchy-phantomat-toggle"
 
 if [[ -e $settings ]]; then
   say "Keeping your settings in $settings"
@@ -90,8 +94,15 @@ else
 
 $marker_begin
 -- Phantomat: added by its scripts/install.sh; scripts/uninstall.sh removes it.
-hl.plugin.load("$plugin")
-dofile("$settings")
+do
+  local disabled_file = io.open(os.getenv("HOME") .. "/.local/state/spatial-overview/disabled", "r")
+  if disabled_file then
+    disabled_file:close()
+  else
+    hl.plugin.load("$plugin")
+    dofile("$settings")
+  end
+end
 $marker_end
 EOF
   say "Added Phantomat to $hyprland_lua (backup next to it)"

@@ -66,7 +66,8 @@ elif [[ -f $hyprland_lua ]] && grep -q 'spatialoverview' "$hyprland_lua"; then
 fi
 
 rm -rf "$data_dir"
-say "Deleted $data_dir"
+rm -f "${XDG_BIN_HOME:-$HOME/.local/bin}/omarchy-phantomat-toggle"
+say "Deleted $data_dir and omarchy-phantomat-toggle"
 
 if ((purge)); then
   rm -f "$config_dir/spatialoverview.lua" "$config_dir/spatialoverview-tuning.lua"
