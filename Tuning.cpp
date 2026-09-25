@@ -57,7 +57,8 @@ namespace SpatialOverview::Tuning {
             {"canvas:grid_opacity", "Grid", "Opacity", "How visible the grid is", FLOAT, 0.16, 0.0, 0.5, 0.01, "%", false},
 
             // ---- camera ------------------------------------------------------------------
-            {"canvas:initial_zoom", "Camera", "Zoomed-out level", "How far Super+Ctrl+G zooms out", FLOAT, 0.72, 0.15, 0.95, 0.01, "%", false},
+            {"canvas:initial_zoom", "Camera", "Zoomed-out level", "How far Super+Ctrl+G zooms out", FLOAT, 0.72, 0.05, 0.95, 0.01, "%", false},
+            {"canvas:min_zoom", "Camera", "Minimum zoom", "Furthest you can zoom out with wheel or Ctrl+-", FLOAT, 0.05, 0.01, 0.50, 0.01, "%", false},
             {"input:pan_sensitivity", "Camera", "Pan speed", "Camera speed when dragging the canvas", FLOAT, 1.0, 0.05, 5.0, 0.05, "×", false},
             {"animation:speed", "Camera", "Flight speed", "Camera speed when flying between HUD and windows", FLOAT, 1.0, 0.2, 8.0, 0.1, "×", false},
             {"canvas:minimap_enabled", "Camera", "Minimap", "Shows the minimap in the corner", BOOL, 1, 0, 1, 1, "", false},
