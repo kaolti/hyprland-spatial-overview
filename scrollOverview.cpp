@@ -2085,6 +2085,21 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             const auto MODS      = g_pInputManager->getModsFromAllKBs();
             const bool NAVIGATOR = navigatorOwnsPointer();
             const bool WHEEL     = e.source == WL_POINTER_AXIS_SOURCE_WHEEL || e.source == WL_POINTER_AXIS_SOURCE_WHEEL_TILT;
+
+            if ((MODS & HL_MODIFIER_META) && e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL && e.delta != 0.0) {
+                if (!canvasNavigationActive) {
+                    toggleCanvasNavigation();
+                } else if (e.delta < 0.0) {
+                    toggleCanvasNavigation();
+                } else {
+                    const float DIRECTION = -1.F;
+                    const float FACTOR    = std::exp(DIRECTION * ScrollOverview::Config::getCanvasZoomStep());
+                    zoomCanvasAt(getOverviewMousePosLocal(pMonitor.lock()), scale->value() * FACTOR);
+                    updateNavigatorHover();
+                }
+                return;
+            }
+
             const bool ZOOM      = (MODS & HL_MODIFIER_CTRL) || (NAVIGATOR && WHEEL);
             if (ZOOM && (!isPersistentCanvas() || canvasNavigationActive) && e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL && e.delta != 0.0) {
                 const float DIRECTION = e.delta > 0.0 ? -1.F : 1.F;
