@@ -1829,7 +1829,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             }
 
             const bool IS_MIDDLE      = (event.button == SECONDARY);
-            const bool GESTURE_ACTIVE = IS_MIDDLE ? (MODS & HL_MODIFIER_META) : WINDOWGESTURE;
+            const bool IN_HUD         = isCanvasNavigationActive() || navigatorOwnsPointer();
+            const bool GESTURE_ACTIVE = IS_MIDDLE ? ((MODS & HL_MODIFIER_META) || IN_HUD) : WINDOWGESTURE;
             if (!GESTURE_ACTIVE && !navigatorOwnsPointer() &&
                 (event.state == WL_POINTER_BUTTON_STATE_PRESSED || canvasForwardedPointerButtons.contains(event.button))) {
                 info.cancelled = forwardCanvasPointerButton(event);
@@ -1840,7 +1841,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
 
         const uint32_t SECONDARY_BUTTON = BTN_MIDDLE;
         const auto     ALL_MODS         = g_pInputManager ? g_pInputManager->getModsFromAllKBs() : 0;
-        if (event.button == SECONDARY_BUTTON && !(ALL_MODS & HL_MODIFIER_META) && !scrollingPanPointerDown)
+        const bool     ALLOW_MIDDLE     = (ALL_MODS & HL_MODIFIER_META) || isCanvasNavigationActive() || navigatorOwnsPointer();
+        if (event.button == SECONDARY_BUTTON && !ALLOW_MIDDLE && !scrollingPanPointerDown)
             return;
 
         if (event.state == WL_POINTER_BUTTON_STATE_PRESSED)
@@ -1968,7 +1970,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             lastMousePosLocal = getOverviewMousePosLocal(pMonitor.lock());
 
             if (event.state == WL_POINTER_BUTTON_STATE_PRESSED) {
-                if (!(ALL_MODS & HL_MODIFIER_META))
+                if (!ALLOW_MIDDLE)
                     return;
 
                 if (beginSubmapMouseClickPending(event.button))
@@ -2057,7 +2059,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         lastMousePosLocal = getOverviewMousePosLocal(pMonitor.lock());
 
         if (event.state == WL_POINTER_BUTTON_STATE_PRESSED) {
-            if (!(ALL_MODS & HL_MODIFIER_META))
+            if (!ALLOW_MIDDLE)
                 return;
 
             if (beginSubmapMouseClickPending(event.button))
