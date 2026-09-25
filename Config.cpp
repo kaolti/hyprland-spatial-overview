@@ -361,7 +361,7 @@ static void registerConfigValues() {
                                                           SFloatValueOptions{.min = 0.01F, .max = 2.F}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CFloatValue>("plugin:spatialoverview:canvas:min_zoom", "minimum shared-canvas camera zoom", 0.05F,
-                                                          SFloatValueOptions{.min = 0.01F, .max = 2.F}));
+                                                          SFloatValueOptions{.min = 0.05F, .max = 2.F}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CFloatValue>("plugin:spatialoverview:canvas:max_zoom", "maximum shared-canvas camera zoom", 2.5F,
                                                           SFloatValueOptions{.min = 0.1F, .max = 8.F}));
@@ -665,7 +665,7 @@ float getCanvasInitialZoom() {
 }
 
 float getCanvasMinZoom() {
-    return std::clamp(getValue<float>("plugin:spatialoverview:canvas:min_zoom"), 0.01F, 2.F);
+    return std::clamp(getValue<float>("plugin:spatialoverview:canvas:min_zoom"), 0.05F, 2.F);
 }
 
 float getCanvasMaxZoom() {
