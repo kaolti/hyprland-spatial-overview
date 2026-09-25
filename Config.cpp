@@ -358,9 +358,9 @@ static void registerConfigValues() {
                                   makeShared<CBoolValue>("plugin:spatialoverview:canvas:places", "workspace keys go to places on the canvas (experimental); off, they do nothing on the canvas", false));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CFloatValue>("plugin:spatialoverview:canvas:initial_zoom", "initial shared-canvas camera zoom", 0.72F,
-                                                          SFloatValueOptions{.min = 0.1F, .max = 2.F}));
+                                                          SFloatValueOptions{.min = 0.01F, .max = 2.F}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CFloatValue>("plugin:spatialoverview:canvas:min_zoom", "minimum shared-canvas camera zoom", 0.15F,
+                                  makeShared<CFloatValue>("plugin:spatialoverview:canvas:min_zoom", "minimum shared-canvas camera zoom", 0.05F,
                                                           SFloatValueOptions{.min = 0.05F, .max = 2.F}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CFloatValue>("plugin:spatialoverview:canvas:max_zoom", "maximum shared-canvas camera zoom", 2.5F,

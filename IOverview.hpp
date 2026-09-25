@@ -38,6 +38,7 @@ class IOverview {
     virtual bool  windowDispatcherAction(const std::string& action) = 0;
 
     virtual void  fullRender() = 0;
+    virtual void  syncAnimationConfig() {}
 
     bool          blockDamageReporting   = false;
 

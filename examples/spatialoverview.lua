@@ -84,7 +84,7 @@ hl.config({
         desktop_mode = true,
         persistent = true,
         initial_zoom = 0.72,
-        min_zoom = 0.15,
+        min_zoom = 0.05,
         max_zoom = 2.5,
         zoom_step = 0.12,
         auto_float = true,
