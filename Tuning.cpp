@@ -59,7 +59,7 @@ namespace SpatialOverview::Tuning {
             // ---- camera ------------------------------------------------------------------
             {"canvas:initial_zoom", "Camera", "Zoomed-out level", "How far Super+Ctrl+G zooms out", FLOAT, 0.72, 0.15, 0.95, 0.01, "%", false},
             {"input:pan_sensitivity", "Camera", "Pan speed", "Camera speed when dragging the canvas", FLOAT, 1.0, 0.05, 5.0, 0.05, "×", false},
-            {"animation:speed", "Camera", "Flight speed", "Camera speed when flying between HUD and windows", FLOAT, 8.0, 1.0, 30.0, 0.5, "×", false},
+            {"animation:speed", "Camera", "Flight speed", "Camera speed when flying between HUD and windows", FLOAT, 1.0, 0.2, 8.0, 0.1, "×", false},
             {"canvas:minimap_enabled", "Camera", "Minimap", "Shows the minimap in the corner", BOOL, 1, 0, 1, 1, "", false},
             {"canvas:minimap_opacity", "Camera", "Minimap opacity", "How solid the minimap is", FLOAT, 0.72, 0.0, 1.0, 0.02, "%", false},
 
@@ -252,12 +252,23 @@ namespace SpatialOverview::Tuning {
 
         void apply(const SParam& param, double value) {
             const auto KEY = fullKey(param);
+            if (std::string_view(param.key) == "animation:speed") {
+                // value is speed multiplier (e.g. 2.0x). Convert to duration in deciseconds: 8.0 / value.
+                float durationDs = sc<float>(value > 1e-4 ? (8.0 / value) : 8.0);
+                durationDs       = std::clamp(durationDs, 0.1F, 30.0F);
+                ScrollOverview::Config::setValue(KEY, durationDs);
+                for (const auto& overview : scrollOverviews()) {
+                    if (overview)
+                        overview->syncAnimationConfig();
+                }
+                return;
+            }
             switch (param.kind) {
                 case BOOL: ScrollOverview::Config::setValue(KEY, value >= 0.5); break;
                 case INT: ScrollOverview::Config::setValue(KEY, sc<int>(std::llround(value))); break;
                 default: ScrollOverview::Config::setValue(KEY, sc<float>(value)); break;
             }
-            if (std::string_view(param.key) == "animation:speed" || std::string_view(param.key) == "animation:enabled") {
+            if (std::string_view(param.key) == "animation:enabled") {
                 for (const auto& overview : scrollOverviews()) {
                     if (overview)
                         overview->syncAnimationConfig();
@@ -317,6 +328,15 @@ namespace SpatialOverview::Tuning {
             case INT: value = ScrollOverview::Config::getValue<int>(KEY); break;
             default: value = ScrollOverview::Config::getValue<float>(KEY); break;
         }
+        if (std::string_view(param.key) == "animation:speed") {
+            // In Hyprland, animation:speed is duration in deciseconds (default 8.0ds = 0.8s).
+            // Convert to a true speed multiplier: multiplier = 8.0 / duration.
+            // Higher multiplier = shorter duration = faster flight.
+            if (value > 1e-4)
+                value = 8.0 / value;
+            else
+                value = param.def;
+        }
         return std::isfinite(value) ? std::clamp(value, param.min, param.max) : param.def;
     }
 
@@ -346,7 +366,13 @@ namespace SpatialOverview::Tuning {
                 return false;
             g_sessionStart.try_emplace(param.key, PREVIOUS);
             apply(param, next);
-            writeFile(param.key, luaValue(param, next));
+            if (std::string_view(param.key) == "animation:speed") {
+                double durationDs = next > 1e-4 ? (8.0 / next) : 8.0;
+                durationDs       = std::clamp(durationDs, 0.1, 30.0);
+                writeFile(param.key, luaValue(param, durationDs));
+            } else {
+                writeFile(param.key, luaValue(param, next));
+            }
             return true;
         }
     }
