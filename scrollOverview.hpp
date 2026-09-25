@@ -71,6 +71,7 @@ class CScrollOverview : public IOverview {
     bool         navigatorKeyAction(uint32_t keysym, uint32_t mods, const std::string& text, bool repeat);
     bool         openNavigator(const std::string& query = {});
     void         landOnWindow(PHLWINDOW window);
+    bool         followCanvasWindow(PHLWINDOW window, bool syncFocus, bool animate = true);
     void         summonWindow(PHLWINDOW window);
     void         revertAllNavigation();
     void         fitAllWindows();
@@ -210,7 +211,6 @@ class CScrollOverview : public IOverview {
     PHLWINDOW    canvasDesktopWindowAtPoint(const Vector2D& point, CBox* renderedBox = nullptr, Vector2D* surfaceLocal = nullptr) const;
     void         zoomCanvasAt(const Vector2D& point, float requestedZoom, bool animate = false);
     bool         manageCanvasWindow(PHLWINDOW window, bool placeNew);
-    bool         followCanvasWindow(PHLWINDOW window, bool syncFocus, bool animate = true);
     void         ensureCanvasKeyboardFocus(PHLWINDOW window = {});
     void         seedCanvasWindows();
     void         forwardCanvasPointerMotion(uint32_t timeMs = 0);
