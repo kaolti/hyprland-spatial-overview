@@ -91,6 +91,7 @@ class CScrollOverview : public IOverview {
     bool         hasNavigationReturn = false;
 
     void         fullRender() override;
+    void         syncAnimationConfig() override;
 
     // Popups: Hyprland places and fades them in the window's real
     // coordinates, which on the canvas are not where the window is drawn.

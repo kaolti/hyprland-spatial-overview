@@ -19,6 +19,7 @@
 #include <hyprland/src/config/values/types/StringValue.hpp>
 
 #include "Config.hpp"
+#include "IOverview.hpp"
 
 namespace SpatialOverview::Tuning {
     namespace {
@@ -58,6 +59,7 @@ namespace SpatialOverview::Tuning {
             // ---- camera ------------------------------------------------------------------
             {"canvas:initial_zoom", "Camera", "Zoomed-out level", "How far Super+Ctrl+G zooms out", FLOAT, 0.72, 0.15, 0.95, 0.01, "%", false},
             {"input:pan_sensitivity", "Camera", "Pan speed", "Camera speed when dragging the canvas", FLOAT, 1.0, 0.05, 5.0, 0.05, "×", false},
+            {"animation:speed", "Camera", "Flight speed", "Camera speed when flying between HUD and windows", FLOAT, 8.0, 1.0, 30.0, 0.5, "×", false},
             {"canvas:minimap_enabled", "Camera", "Minimap", "Shows the minimap in the corner", BOOL, 1, 0, 1, 1, "", false},
             {"canvas:minimap_opacity", "Camera", "Minimap opacity", "How solid the minimap is", FLOAT, 0.72, 0.0, 1.0, 0.02, "%", false},
 
@@ -254,6 +256,12 @@ namespace SpatialOverview::Tuning {
                 case BOOL: ScrollOverview::Config::setValue(KEY, value >= 0.5); break;
                 case INT: ScrollOverview::Config::setValue(KEY, sc<int>(std::llround(value))); break;
                 default: ScrollOverview::Config::setValue(KEY, sc<float>(value)); break;
+            }
+            if (std::string_view(param.key) == "animation:speed" || std::string_view(param.key) == "animation:enabled") {
+                for (const auto& overview : scrollOverviews()) {
+                    if (overview)
+                        overview->syncAnimationConfig();
+                }
             }
         }
     }
