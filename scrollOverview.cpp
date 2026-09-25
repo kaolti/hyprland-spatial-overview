@@ -4839,7 +4839,18 @@ bool CScrollOverview::arrangeCanvasWindows() {
     const size_t islandCols = computeColumns(NUM_ISLANDS);
     const size_t islandRows = (NUM_ISLANDS + islandCols - 1) / islandCols;
 
-    const float ISLANDGAP = GRID * 3.F;
+    // Calculate generous island spacing after knowing the full arranged dimensions of all islands.
+    float maxIslandWidth  = 0.F;
+    float maxIslandHeight = 0.F;
+    for (const auto& island : islands) {
+        maxIslandWidth  = std::max(maxIslandWidth, sc<float>(island.size.x));
+        maxIslandHeight = std::max(maxIslandHeight, sc<float>(island.size.y));
+    }
+
+    const float monW = sc<float>(MONITOR->m_size.x);
+    const float monH = sc<float>(MONITOR->m_size.y);
+    const float islandGapX = std::round(std::max({monW * 0.85F, maxIslandWidth * 0.25F, GRID * 16.F}) / GRID) * GRID;
+    const float islandGapY = std::round(std::max({monH * 0.85F, maxIslandHeight * 0.25F, GRID * 12.F}) / GRID) * GRID;
 
     std::vector<float> islandColWidths(islandCols, 0.F);
     std::vector<float> islandRowHeights(islandRows, 0.F);
@@ -4853,21 +4864,38 @@ bool CScrollOverview::arrangeCanvasWindows() {
     std::vector<float> islandColX(islandCols, 0.F);
     std::vector<float> islandRowY(islandRows, 0.F);
     for (size_t c = 1; c < islandCols; ++c)
-        islandColX[c] = islandColX[c - 1] + islandColWidths[c - 1] + ISLANDGAP;
+        islandColX[c] = islandColX[c - 1] + islandColWidths[c - 1] + islandGapX;
     for (size_t r = 1; r < islandRows; ++r)
-        islandRowY[r] = islandRowY[r - 1] + islandRowHeights[r - 1] + ISLANDGAP;
+        islandRowY[r] = islandRowY[r - 1] + islandRowHeights[r - 1] + islandGapY;
 
-    for (size_t k = 0; k < NUM_ISLANDS; ++k) {
-        const size_t c = k % islandCols;
-        const size_t r = k / islandCols;
-        islands[k].packedPosition = Vector2D{islandColX[c], islandRowY[r]};
+    const float totalPackedWidth  = islandColX.back() + islandColWidths.back();
+    const float totalPackedHeight = islandRowY.back() + islandRowHeights.back();
+
+    // Center each row of islands horizontally within the total packed width
+    for (size_t r = 0; r < islandRows; ++r) {
+        const size_t startIdx   = r * islandCols;
+        const size_t endIdx     = std::min(startIdx + islandCols, NUM_ISLANDS);
+        const size_t countInRow = endIdx - startIdx;
+        if (countInRow == 0)
+            continue;
+
+        float rowWidth = 0.F;
+        for (size_t c = 0; c < countInRow; ++c) {
+            rowWidth += sc<float>(islands[startIdx + c].size.x);
+            if (c + 1 < countInRow)
+                rowWidth += islandGapX;
+        }
+
+        const float rowOffsetX = std::round(((totalPackedWidth - rowWidth) * 0.5F) / GRID) * GRID;
+        float curX = rowOffsetX;
+        for (size_t c = 0; c < countInRow; ++c) {
+            islands[startIdx + c].packedPosition = Vector2D{curX, islandRowY[r]};
+            curX += sc<float>(islands[startIdx + c].size.x) + islandGapX;
+        }
     }
 
-    const float packedWidth  = islandColX.back() + islandColWidths.back();
-    const float packedHeight = islandRowY.back() + islandRowHeights.back();
-
     const auto CAMERA_CENTER = MONITOR->m_position + viewOffset->value() + MONITOR->m_size * 0.5F;
-    Vector2D   worldOrigin   = CAMERA_CENTER - Vector2D{packedWidth, packedHeight} * 0.5F;
+    Vector2D   worldOrigin   = CAMERA_CENTER - Vector2D{totalPackedWidth, totalPackedHeight} * 0.5F;
     worldOrigin.x            = std::round(worldOrigin.x / GRID) * GRID;
     worldOrigin.y            = std::round(worldOrigin.y / GRID) * GRID;
 
