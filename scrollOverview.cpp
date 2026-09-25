@@ -4696,67 +4696,11 @@ bool CScrollOverview::arrangeCanvasWindows() {
         return false;
     }
 
-    const float GRID        = sc<float>(ScrollOverview::Config::getCanvasGridSize());
-    const float SIMILARITY  = ScrollOverview::Config::getCanvasArrangeSizeSimilarity();
-    const float RESIZELIMIT = ScrollOverview::Config::getCanvasArrangeResizeLimit();
-    const auto relativeChange = [](const Vector2D& from, const Vector2D& to) {
-        return std::max(std::abs(to.x - from.x) / std::max(1.0, from.x), std::abs(to.y - from.y) / std::max(1.0, from.y));
-    };
-    const auto snappedSize = [&](const Vector2D& size) {
-        return Vector2D{
-            std::max(sc<double>(GRID * 2.F), std::round(size.x / GRID) * GRID),
-            std::max(sc<double>(GRID * 2.F), std::round(size.y / GRID) * GRID),
-        };
-    };
-
-    for (auto& item : items) {
-        const auto CANDIDATE = snappedSize(item.originalBox.size());
-        if (relativeChange(item.originalBox.size(), CANDIDATE) <= RESIZELIMIT)
-            item.arrangedSize = CANDIDATE;
-    }
+    const float GRID = sc<float>(ScrollOverview::Config::getCanvasGridSize());
 
     std::map<int, std::vector<size_t>> workspaceGroups;
     for (size_t i = 0; i < items.size(); ++i)
         workspaceGroups[items[i].workspaceId].emplace_back(i);
-
-    for (const auto& [wsId, indices] : workspaceGroups) {
-        std::unordered_set<size_t> matched;
-        for (const auto seed : indices) {
-            if (matched.contains(seed))
-                continue;
-
-            std::vector<size_t> cluster{seed};
-            matched.emplace(seed);
-            const auto SEEDSIZE = items[seed].originalBox.size();
-            for (const auto candidate : indices) {
-                if (matched.contains(candidate))
-                    continue;
-                const auto SIZE = items[candidate].originalBox.size();
-                const float DW  = std::abs(SIZE.x - SEEDSIZE.x) / std::max({1.0, SIZE.x, SEEDSIZE.x});
-                const float DH  = std::abs(SIZE.y - SEEDSIZE.y) / std::max({1.0, SIZE.y, SEEDSIZE.y});
-                if (DW <= SIMILARITY && DH <= SIMILARITY) {
-                    cluster.emplace_back(candidate);
-                    matched.emplace(candidate);
-                }
-            }
-
-            if (cluster.size() < 2)
-                continue;
-
-            Vector2D average;
-            for (const auto index : cluster)
-                average += items[index].originalBox.size();
-            average /= sc<float>(cluster.size());
-            const auto COMMONSIZE = snappedSize(average);
-            if (!std::all_of(cluster.begin(), cluster.end(), [&](size_t index) {
-                    return relativeChange(items[index].originalBox.size(), COMMONSIZE) <= RESIZELIMIT;
-                }))
-                continue;
-
-            for (const auto index : cluster)
-                items[index].arrangedSize = COMMONSIZE;
-        }
-    }
 
     std::vector<int> sortedWorkspaceIds;
     sortedWorkspaceIds.reserve(workspaceGroups.size());
@@ -4907,6 +4851,8 @@ bool CScrollOverview::arrangeCanvasWindows() {
             item.target->setPositionGlobal(BOX);
             item.target->warpPositionSize();
             item.target->damageEntire();
+            if (const auto IT = g_canvasFill.find(item.window.get()); IT != g_canvasFill.end())
+                IT->second.filled = BOX;
         }
     }
 
