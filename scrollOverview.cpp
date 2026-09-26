@@ -129,15 +129,22 @@ static float minimapFlashAlpha(const Time::steady_tp& now) {
 // Windows fullscreen on a screen whose canvas stepped aside for them (see
 // "Fullscreen on the canvas").
 struct SCanvasFullscreen {
-    PHLWINDOWREF        window;
-    PHLMONITORREF       monitor;
-    std::optional<CBox> request; // what an X11 app last asked for meanwhile (X11 coordinates)
-    std::optional<CBox> before;  // where it was before, as the canvas last drew it
+    PHLWINDOWREF            window;
+    PHLMONITORREF           monitor;
+    std::optional<CBox>     request; // what an X11 app last asked for meanwhile (X11 coordinates)
+    std::optional<CBox>     before;  // where it was before, as the canvas last drew it
+    std::optional<Vector2D> savedCamera;
 };
 static std::vector<SCanvasFullscreen> g_canvasFullscreen;
 void unconstrainCanvasWindows();
 static bool canvasFullscreenWindow(const PHLWINDOW& window) {
     return window && std::ranges::any_of(g_canvasFullscreen, [&window](const auto& entry) { return entry.window.lock() == window; });
+}
+static bool isScreensaverWindow(const PHLWINDOW& window) {
+    if (!window)
+        return false;
+    const auto APPID = window->m_class.empty() ? window->m_initialClass : window->m_class;
+    return APPID == "org.omarchy.screensaver" || APPID.ends_with(".screensaver");
 }
 // Each window's box when the canvas last drew it outside fullscreen. After
 // fullscreen Hyprland centers a floating window on its monitor; the canvas
@@ -2149,9 +2156,11 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             return;
 
         if (isCanvasDesktop() && window && window->m_monitor == pMonitor) {
-            manageCanvasWindow(window, true);
-            followCanvasWindow(window, false);
-            noteCanvasLayoutChanged();
+            if (!isScreensaverWindow(window) && !Fullscreen::controller()->isFullscreen(window)) {
+                manageCanvasWindow(window, true);
+                followCanvasWindow(window, false);
+                noteCanvasLayoutChanged();
+            }
         }
 
         if (sharedStateOwner && SpatialOverview::Navigator::isOpen())
@@ -3886,7 +3895,7 @@ static void canvasFullscreenStepAside(const PHLWINDOW& window, const PHLMONITOR&
         window->m_monitor = monitor;
         Fullscreen::controller()->setFullscreenMode(window, MODES.internal, MODES.client);
     }
-    g_canvasFullscreen.push_back({.window = window, .monitor = monitor, .before = before});
+    g_canvasFullscreen.push_back({.window = window, .monitor = monitor, .before = before, .savedCamera = canvas->restingCameraOffset()});
     removeOverview(canvas);
     g_canvasFullscreenApplying = false;
     if (from)
@@ -3917,8 +3926,20 @@ static void canvasFullscreenComeBack(const SCanvasFullscreen& entry) {
         }))
         canvas->toggleCanvasNavigation();
     const auto TARGET = validMapped(WINDOW) ? WINDOW->layoutTarget() : nullptr;
-    if (!TARGET || WINDOW->m_workspace != MONITOR->m_activeWorkspace || Fullscreen::controller()->isFullscreen(WINDOW))
+    if (!TARGET || WINDOW->m_workspace != MONITOR->m_activeWorkspace || Fullscreen::controller()->isFullscreen(WINDOW)) {
+        if (!validMapped(WINDOW)) {
+            auto current = getOverviewWindowToShow(Desktop::focusState()->window());
+            if (!current || current->m_monitor != MONITOR || !shouldShowOverviewWindow(current))
+                current = MONITOR->m_activeWorkspace ? getOverviewWindowToShow(MONITOR->m_activeWorkspace->getLastFocusedWindow()) : nullptr;
+            if (validMapped(current) && shouldShowOverviewWindow(current)) {
+                canvas->canvasAdoptFocus(current);
+                canvas->followCanvasWindow(current, true, false);
+            } else if (entry.savedCamera) {
+                canvas->warpCameraOffset(*entry.savedCamera);
+            }
+        }
         return;
+    }
     // The keyboard stays with the window that left fullscreen, not with
     // whatever the reopened canvas had selected.
     auto keepFocus = Hyprutils::Utils::CScopeGuard([canvas, WINDOW, FOCUSED] {
@@ -4552,7 +4573,7 @@ bool CScrollOverview::manageCanvasWindow(PHLWINDOW window, bool placeNew) {
 
     window = getOverviewWindowToShow(window);
     auto TARGET = window ? window->layoutTarget() : nullptr;
-    if (!shouldShowOverviewWindow(window) || !TARGET || window->m_pinned)
+    if (!shouldShowOverviewWindow(window) || !TARGET || window->m_pinned || isScreensaverWindow(window))
         return false;
 
     if (window->m_workspace && window->m_workspace->m_isSpecialWorkspace) return false;
@@ -4609,7 +4630,7 @@ bool CScrollOverview::manageCanvasWindow(PHLWINDOW window, bool placeNew) {
     const auto occupied = [&](const CBox& candidate) {
         for (const auto& existingRef : Desktop::windowState()->windows()) {
             const auto EXISTING = getOverviewWindowToShow(existingRef);
-            if (!shouldShowOverviewWindow(EXISTING) || EXISTING == window || !EXISTING->layoutTarget())
+            if (!shouldShowOverviewWindow(EXISTING) || EXISTING == window || !EXISTING->layoutTarget() || isScreensaverWindow(EXISTING))
                 continue;
             auto BOX = EXISTING->layoutTarget()->position();
             BOX.expand(GAP * 0.5F);
@@ -4668,7 +4689,7 @@ bool CScrollOverview::arrangeCanvasWindows() {
 
     for (const auto& windowRef : windows) {
         auto WINDOW = getOverviewWindowToShow(windowRef);
-        if (!shouldShowOverviewWindow(WINDOW) || WINDOW->m_pinned || !visited.emplace(WINDOW.get()).second)
+        if (!shouldShowOverviewWindow(WINDOW) || WINDOW->m_pinned || isScreensaverWindow(WINDOW) || !visited.emplace(WINDOW.get()).second)
             continue;
 
         manageCanvasWindow(WINDOW, false);
@@ -9482,6 +9503,13 @@ void CScrollOverview::noteCanvasLayoutChanged() {
 
 Vector2D CScrollOverview::restingCameraOffset() const {
     return viewOffset ? viewOffset->goal() : Vector2D{};
+}
+
+void CScrollOverview::warpCameraOffset(const Vector2D& offset) {
+    if (viewOffset) {
+        viewOffset->setValueAndWarp(offset);
+        *viewOffset = offset;
+    }
 }
 
 CBox CScrollOverview::currentCanvasViewportWorld() const {
