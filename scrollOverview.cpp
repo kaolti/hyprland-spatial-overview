@@ -2483,6 +2483,7 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
         return;
 
     const float BLURSTRENGTH = ScrollOverview::Config::getBlurStrength();
+    const bool  BLURENABLED  = ScrollOverview::Config::getBlur();
     if (lastBackdropWallpaperMode != wallpaperMode) {
         backdropBlurDirty         = true;
         lastBackdropWallpaperMode = wallpaperMode;
@@ -2490,6 +2491,10 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
     if (std::abs(lastBackdropBlurStrength - BLURSTRENGTH) > 0.001F) {
         backdropBlurDirty         = true;
         lastBackdropBlurStrength  = BLURSTRENGTH;
+    }
+    if (lastBackdropBlurEnabled != BLURENABLED) {
+        backdropBlurDirty       = true;
+        lastBackdropBlurEnabled = BLURENABLED;
     }
 
     const auto FBSIZE     = monitor->m_pixelSize;
@@ -9060,10 +9065,13 @@ void CScrollOverview::render() {
         OverviewRender::flushPass(MONITOR);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 1.F}}, {});
         renderBackdropTiled(MONITOR, backdropSharpFB->getTexture(), 1.F, BACKDROP);
-    } else if (WALLPAPERMODE == 0 || WALLPAPERMODE == 2)
+    } else if (WALLPAPERMODE == 0 || WALLPAPERMODE == 2) {
         renderGlobalWallpaper(MONITOR, NOW);
-    else
+        OverviewRender::flushPass(MONITOR);
+    } else {
         g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 1.F}}, {});
+        OverviewRender::flushPass(MONITOR);
+    }
 
     if (BLURALPHA > 0.001F && backdropBlurFB && backdropBlurFB->isAllocated() && backdropBlurFB->getTexture())
         renderBackdropBlurCache(MONITOR, BLURALPHA, BACKDROP);

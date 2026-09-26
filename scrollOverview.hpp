@@ -279,6 +279,7 @@ class CScrollOverview : public IOverview {
     float  lastOverviewBlurScale    = 1.F;
     int    lastBackdropWallpaperMode = -1;
     float  lastBackdropBlurStrength = -1.F;
+    bool   lastBackdropBlurEnabled  = false;
     Vector2D lastOverviewBlurViewOffset = Vector2D{};
     SP<Render::IFramebuffer> backdropBlurFB;
     SP<Render::IFramebuffer> backdropSharpFB;
